@@ -6,6 +6,17 @@ import { EditorDashboard } from '../../src/pages/editorDashboard';
 
 const FIXED_POSTCARD_URL = 'https://new.express.adobe.com/design/template/urn:aaid:sc:VA6C2:f2c97bf0-1039-5b0d-be7a-528c0060757b?category=text&entryPoint=template&taskID=postcard';
 
+/** Host of an identity-provider URL, for step names/logs. The raw URL carries
+ *  state/rart OAuth tokens and is echoed into the results CSV and the [ADOBE_RESULT]
+ *  log line — using only the host avoids leaking tokens and keeps failure grouping usable. */
+function providerHost(providerUrl: string): string {
+  try {
+    return new URL(providerUrl).host;
+  } catch {
+    return providerUrl.slice(0, 60);
+  }
+}
+
 defineAdobeAccountTests('script flow', async ({ page, context, account, stepTracker }, testInfo) => {
     const adobe = new AdobePage(page);
     let editor: EditorDashboard;   // bound to the postcard tab once it opens
@@ -27,7 +38,7 @@ defineAdobeAccountTests('script flow', async ({ page, context, account, stepTrac
   stepTracker.setStep('check email provider');
   const provider  =  await adobe.getLoginProvider();
 
-  stepTracker.setStep('Login with'+ provider);
+  stepTracker.setStep('Login with ' + providerHost(provider));
   if(provider.includes('accounts.google.com')){
         await ggl.g_login(account.email,account.password);
   } else if (provider.includes('login.microsoftonline.com')){
@@ -92,7 +103,7 @@ defineAdobeAccountTests('script flow', async ({ page, context, account, stepTrac
   // Firefly-era 'Selected image' radio, which this editor's download panel does not have.
   // Both confirmed live by tests/adobe/experiment-v8.spec.ts.
   stepTracker.setStep('Download');
-  const filePath = await editor.downloadDesign(testInfo.workerIndex);
+  const filePath = await editor.downloadDesign(testInfo.workerIndex, account.email);
   console.log(`File saved to: ${filePath}`);
   expect(filePath).toBeTruthy();
 

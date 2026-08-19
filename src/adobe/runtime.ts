@@ -3,12 +3,20 @@ import path from 'node:path';
 export const ADOBE_ACCOUNT_ATTACHMENT = 'adobe-account';
 export const ADOBE_STEP_ATTACHMENT = 'adobe-step';
 export const ADOBE_LINK_ATTACHMENT = 'adobe-link';
+export const ADOBE_LOGIN_ATTACHMENT = 'adobe-login';
 export const ADOBE_NO_FRESH_ACCOUNTS_REASON = 'No fresh accounts available';
 
 export const ADOBE_RESULTS_HEADERS = [
   'timestamp',
   'email',
   'test_status',
+  // 'yes' once the Adobe dashboard was confirmed for this account. Tracked apart
+  // from test_status because a test can fail AFTER a successful login (Let's Go,
+  // dwell, template flow) — those accounts did log in and must still be counted.
+  'logged_in',
+  'dashboard_url',
+  // Adobe's server-side user ID, captured from authenticated UDS traffic.
+  'owner_entity',
   'failed_at_step',
   'failure_reason',
   'duration_ms',

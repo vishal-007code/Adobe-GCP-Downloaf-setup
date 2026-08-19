@@ -1,0 +1,33 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - build
+      - '--platform=linux/amd64'
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE:$_TAG'
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE:latest'
+      - '.'
+    timeout: '1200s'
+
+  # Push both tags
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - push
+      - '--all-tags'
+      - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE'
+
+images:
+  - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE:$_TAG'
+  - '$_REGION-docker.pkg.dev/$PROJECT_ID/$_REPO/$_IMAGE:latest'
+
+substitutions:
+  _REGION: asia-south1
+  _REPO: adobe-automation
+  _IMAGE: playwright-adobe
+  _TAG: latest
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY

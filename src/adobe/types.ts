@@ -26,6 +26,9 @@ export type AdobeResultRow = {
   timestamp: string;
   email: string;
   test_status: AdobeResultStatus;
+  logged_in: string;
+  dashboard_url: string;
+  owner_entity: string;
   failed_at_step: string;
   failure_reason: string;
   duration_ms: string;

@@ -203,7 +203,7 @@ export class EditorDashboard {
      * always constructed against the tab holding the design, so the wrong-tab bug cannot
      * come back the next time the flow changes which tab that is.
      */
-    async downloadDesign(workerIndex: number = 0): Promise<string> {
+    async downloadDesign(workerIndex: number = 0, accountEmail?: string): Promise<string> {
         // The share/publish panel left open by the previous step is a modal <dialog>, which
         // makes the rest of the page inert. The trigger is visible and enabled in the top
         // nav the whole time, but the click cannot land — the probe's first run burned a
@@ -232,7 +232,12 @@ export class EditorDashboard {
         fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
         // Worker-prefixed because suggestedFilename is minute-resolution
         // ("Untitled - August 18, 2026 at 20.51.17.png") and parallel workers collide.
-        const filePath = path.join(DOWNLOADS_DIR, `worker-${workerIndex}-${download.suggestedFilename()}`);
+        // Email-slugged (when provided) so each PNG maps back to the account that made
+        // it — essential once thousands land in one GCS prefix.
+        const emailSlug = accountEmail
+            ? accountEmail.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '_') + '-'
+            : '';
+        const filePath = path.join(DOWNLOADS_DIR, `worker-${workerIndex}-${emailSlug}${download.suggestedFilename()}`);
         await download.saveAs(filePath);
         console.log(`downloadDesign: saved ${filePath}`);
 

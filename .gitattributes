@@ -1,0 +1,12 @@
+# Shell scripts and Node scripts run on Linux (Cloud Shell, the Cloud Run container).
+# Force LF regardless of the checkout platform: a CRLF checkout makes bash fail with
+# "bad interpreter: /usr/bin/env bash^M" and breaks heredocs mid-script.
+*.sh  text eol=lf
+*.mjs text eol=lf
+
+# Dockerfile and entrypoints are consumed by Linux too.
+Dockerfile text eol=lf
+
+# Data files: keep bytes exactly as written so account CSVs are never mangled.
+*.csv  -text
+*.xlsx binary
