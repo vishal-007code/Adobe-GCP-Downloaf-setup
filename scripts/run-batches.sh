@@ -41,13 +41,13 @@ CPU="${CPU:-2}"
 MEMORY="${MEMORY:-8Gi}"
 # Concurrent tasks per job. A job's deploy must satisfy PARALLELISM x {CPU, MEMORY}
 # within the regional quota: 20 vCPU and 40 GiB total in asia-south1.
-#   PARALLELISM=5 x CPU=2   = 10 vCPU   (<= 20)
-#   PARALLELISM=5 x MEMORY=8Gi = 40 GiB (<= 40)   -> deploys with headroom.
+#   PARALLELISM=4 x CPU=2   = 8 vCPU    (<= 20)
+#   PARALLELISM=4 x MEMORY=8Gi = 32 GiB (<= 40)   -> free-tier quota, with headroom.
 # Throughput ~= PARALLELISM x WORKERS accounts in flight. The ~3.5 min dashboard
 # dwell leaves the CPU mostly idle, so WORKERS can safely exceed CPU (oversubscribe).
 # 8 x 4 = ~32 accounts in flight at ~6 min/account -> ~30300 done in ~4 days (~Fri).
 # Going faster needs a Cloud Run CPU/Memory quota increase for the region.
-PARALLELISM="${PARALLELISM:-5}"
+PARALLELISM="${PARALLELISM:-4}"
 # Workers per task. 4 oversubscribes 2 vCPU (fine during the idle dwell); if logins
 # start failing/timing out under load, drop to 3 (gentler, ~a day slower).
 ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-2}"
