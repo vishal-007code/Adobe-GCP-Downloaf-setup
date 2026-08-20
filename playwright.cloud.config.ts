@@ -49,22 +49,32 @@ export default defineConfig({
     // Requires `npx playwright install chromium` in the Dockerfile, which supplies
     // the full build alongside the shell.
     channel: 'chromium',
-    // Linux/Cloud Run compatible args — no GPU, no D3D11 (Windows-only).
-    // --no-sandbox is required because the container runs as root.
+    // Linux/Cloud Run compatible args. --no-sandbox is required (container runs as root).
+    // GL: Cloud Run has NO hardware GPU, but plain --disable-gpu leaves Chromium with
+    // no GL context at all, and Adobe Express's WebGL authoring engine then never boots
+    // ("Authoring engine did not start", stores never _connect, download button never
+    // appears). Give it a SOFTWARE GL context via SwiftShader/ANGLE instead so the editor
+    // can render/export without a real GPU. (Locally, playwright.config.ts uses the real
+    // GPU via --use-angle=d3d11; this is the headless-Linux equivalent.)
     launchOptions: {
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu',
+        '--use-gl=angle',
+        '--use-angle=swiftshader',
+        '--enable-unsafe-swiftshader',
       ],
     },
   },
   projects: [
     {
       name: 'adobe-chromium',
-      testMatch: /tests[\\/]adobe[\\/].+\.spec\.ts/,
-      testIgnore: /tests[\\/]adobe[\\/].+\.low-network\.debug\.spec\.ts$/,
+      // Cloud runs ONLY the production download flow. The glob used to be
+      // `.+\.spec\.ts`, which also swept in experiment-v8.spec.ts — a diagnostic probe
+      // that still runs the old GPU-dependent Share→Publish leg and heavy html/aria
+      // dumps, polluting cloud runs. Match script.spec.ts exactly.
+      testMatch: /tests[\\/]adobe[\\/]script\.spec\.ts$/,
       retries: 0,
       use: { ...devices['Desktop Chrome'] },
     },
