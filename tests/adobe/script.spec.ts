@@ -51,6 +51,15 @@ defineAdobeAccountTests('script flow', async ({ page, context, account, stepTrac
   stepTracker.setStep('Activate by Lets Go');
   await adobe.skipLetsGoViaAPI(account.email);
 
+  // Activation-only mode: ADOBE_STOP_AFTER_LETS_GO=1 stops here — login is proven and
+  // Let's Go dismissed, but the postcard tab + download are skipped. Leave the flag
+  // unset (or !=1) to run the full download flow. Lets the same image serve both an
+  // activation run and a download run, chosen per-launch.
+  if (process.env.ADOBE_STOP_AFTER_LETS_GO?.trim() === '1') {
+    stepTracker.setStep('Stop after Lets Go');
+    return;
+  }
+
   stepTracker.setStep('Navigate to Fixed Postcard');
   // Settle buffer to let late dashboard content/interrupts render.
   await page.waitForTimeout(1200);
