@@ -41,7 +41,22 @@ const GPU_MODE = 'headless' as 'off' | 'headed' | 'headless';
 const GPU_ARGS = ['--ignore-gpu-blocklist', '--enable-gpu', '--enable-webgl', '--use-angle=d3d11'];
 
 const adobeWorkers = GPU_MODE === 'headed' ? 1 : (BULK ? WORKERS : undefined);
-const adobeLaunchOptions = GPU_MODE === 'off' ? undefined : { args: GPU_ARGS };
+// '--disable-blink-features=AutomationControlled' hides navigator.webdriver, the signal
+// Google's federated sign-in keys off to reject the login with "Couldn't sign you in —
+// This browser or app may not be secure" (it blocks at the EMAIL step, before credentials
+// are ever checked). Without this flag the 2026-09-29 headless runs failed 100% on that
+// block. Verified fix: with it, accounts pass in plain headless with parallel workers
+// (3/3 in 37.8s), so no headed mode or worker-count sacrifice is needed.
+const STEALTH_ARGS = ['--disable-blink-features=AutomationControlled'];
+const adobeLaunchOptions = GPU_MODE === 'off' ? { args: STEALTH_ARGS } : { args: [...GPU_ARGS, ...STEALTH_ARGS] };
+
+// GPU_MODE only means anything to Chromium: `channel: 'chromium'` selects the full
+// browser in new headless mode, and GPU_ARGS are Chromium command-line flags. Keep
+// them on the Chromium projects so the Firefox project doesn't inherit either.
+const chromiumUse = {
+  channel: (GPU_MODE === 'headless' ? 'chromium' : undefined) as 'chromium' | undefined,
+  launchOptions: adobeLaunchOptions,
+};
 
 export default defineConfig({
   testDir: './tests',
@@ -68,8 +83,6 @@ export default defineConfig({
     trace: BULK ? 'off' : 'retain-on-failure',
     screenshot: 'only-on-failure',
     headless: GPU_MODE !== 'headed',
-    channel: GPU_MODE === 'headless' ? 'chromium' : undefined,
-    launchOptions: adobeLaunchOptions,
   },
   projects: [
     {
@@ -79,13 +92,24 @@ export default defineConfig({
         : /tests[\\/]adobe[\\/].+\.spec\.ts/,
       testIgnore: adobeLowNetworkDebugEnabled ? undefined : adobeDebugSpecPattern,
       retries: 0,
-      use: { ...devices['Desktop Chrome'] },
+      use: { ...devices['Desktop Chrome'], ...chromiumUse },
+    },
+    {
+      // Same adobe specs on Firefox. GPU_MODE/GPU_ARGS do not apply here (Chromium-only),
+      // so if Adobe Express complains about performance, run GPU_MODE = 'headed' instead.
+      name: 'adobe-firefox',
+      testMatch: adobeLowNetworkDebugEnabled
+        ? adobeDebugSpecPattern
+        : /tests[\\/]adobe[\\/].+\.spec\.ts/,
+      testIgnore: adobeLowNetworkDebugEnabled ? undefined : adobeDebugSpecPattern,
+      retries: 0,
+      use: { ...devices['Desktop Firefox'] },
     },
     {
       name: 'internal-chromium',
       testMatch: /tests[\\/]internal[\\/].+\.spec\.ts/,
       retries: 0,
-      use: { ...devices['Desktop Chrome'] },
+      use: { ...devices['Desktop Chrome'], ...chromiumUse },
     },
   ],
 });
