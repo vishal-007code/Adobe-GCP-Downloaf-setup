@@ -32,7 +32,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-project-8606ec18-5b16-4826-af3}"
+# Defaults to the active gcloud project (projects rotate per trial; never hardcode one).
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null | tr -d '\r')}"
+: "${PROJECT_ID:?set PROJECT_ID, or pick a project with: gcloud config set project <id>}"
 JOB_PREFIX="${JOB_PREFIX:-adobe-login}"
 REGIONS="${REGIONS:-asia-south1 asia-south2}"
 [[ -n "${REGION:-}" ]] && REGIONS="$REGION"

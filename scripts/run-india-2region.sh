@@ -6,7 +6,7 @@
 #   asia-south1 (Mumbai)  -> first  half of the accounts
 #   asia-south2 (Delhi)   -> second half of the accounts
 #
-# Each region runs the safe per-region config (PARALLELISM=4 x WORKERS=2 = ~8
+# Each region runs the safe per-region config (PARALLELISM=9 tasks x 1 browser = ~9
 # accounts in flight, within the ~20 vCPU / 40 GiB regional quota). The default is
 # the full download flow (ADOBE_STOP_AFTER_LETS_GO=0); each finished download is
 # recorded in the logs (no PNGs kept) — report with `bash scripts/build-run-report.sh`.
@@ -29,7 +29,9 @@ set -euo pipefail
 
 : "${IMAGE_URI:?IMAGE_URI is required. Run scripts/setup-run.sh first and copy the printed IMAGE_URI.}"
 
-PROJECT_ID="${PROJECT_ID:-project-8606ec18-5b16-4826-af3}"
+# Defaults to the active gcloud project (projects rotate per trial; never hardcode one).
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null | tr -d '\r')}"
+: "${PROJECT_ID:?set PROJECT_ID, or pick a project with: gcloud config set project <id>}"
 IMAGE_URI_S1="${IMAGE_URI_S1:-$IMAGE_URI}"
 IMAGE_URI_S2="${IMAGE_URI_S2:-$IMAGE_URI}"
 
@@ -45,12 +47,12 @@ CSV_B="${CSV_B:-}"
 # the safe within-quota values. Bump PARALLELISM to 10 only if the region's
 # Cloud Run vCPU quota is confirmed at 20 (10 x CPU=2 = 20 vCPU, no headroom).
 export CPU="${CPU:-2}"
-# Download-flow defaults, same as run-batches.sh: the editor + export needs far more
-# memory than login-only, and 4Gi x 3 workers crashed with "page.goto: Page crashed"
-# (OOM). 8Gi x PARALLELISM 4 = 8 vCPU / 32 GiB per region, inside the ~20 vCPU / 40 GiB quota.
-export MEMORY="${MEMORY:-8Gi}"
-export PARALLELISM="${PARALLELISM:-4}"
-export ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-2}"
+# Download-flow defaults, same as run-batches.sh (see the reasoning there): ONE browser
+# per 2-vCPU task, because the software-GL editor starves with two. 9 x 2 vCPU / 4Gi =
+# 18 vCPU / 36 GiB per region, inside the ~20 vCPU / 40 GiB quota.
+export MEMORY="${MEMORY:-4Gi}"
+export PARALLELISM="${PARALLELISM:-9}"
+export ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-1}"
 export ADOBE_STOP_AFTER_LETS_GO="${ADOBE_STOP_AFTER_LETS_GO:-0}"
 export TASK_TIMEOUT="${TASK_TIMEOUT:-8h}"
 

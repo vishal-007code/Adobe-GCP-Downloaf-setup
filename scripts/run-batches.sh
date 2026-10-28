@@ -2,12 +2,13 @@
 # Launch parallel Cloud Run job batches using a pre-built image.
 # Requires: IMAGE_URI from scripts/setup-run.sh
 # Does NOT build Docker image or touch IAM/bucket setup — that is setup-run.sh's job.
+# (One exception: it syncs the Chat webhook from .env.local into Secret Manager.)
 #
 # Usage:
 #   IMAGE_URI=<uri> bash scripts/run-batches.sh
 #
 # Example:
-#   export IMAGE_URI=asia-south1-docker.pkg.dev/project-8606ec18-5b16-4826-af3/playwright-jobs/adobe-login-flow:20260622120000
+#   export IMAGE_URI=asia-south1-docker.pkg.dev/<project>/playwright-jobs/adobe-login-flow:<tag>
 #   export INPUT_CSV=accounts.csv
 #   export TOTAL_ACCOUNTS=20578
 #   bash scripts/run-batches.sh
@@ -21,7 +22,9 @@ fi
 
 : "${IMAGE_URI:?IMAGE_URI is required. Run scripts/setup-run.sh first and copy the printed IMAGE_URI.}"
 
-PROJECT_ID="${PROJECT_ID:-project-8606ec18-5b16-4826-af3}"
+# Defaults to the active gcloud project (projects rotate per trial; never hardcode one).
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null | tr -d '\r')}"
+: "${PROJECT_ID:?set PROJECT_ID, or pick a project with: gcloud config set project <id>}"
 REGION="${REGION:-asia-south1}"
 RUNTIME_SERVICE_ACCOUNT="${RUNTIME_SERVICE_ACCOUNT:-playwright-runner@${PROJECT_ID}.iam.gserviceaccount.com}"
 ACCOUNTS_BUCKET="${ACCOUNTS_BUCKET:-${PROJECT_ID}-adobe-accounts}"
@@ -38,19 +41,21 @@ TOTAL_ACCOUNTS="${TOTAL_ACCOUNTS:-}"
 BATCH_SIZE="${BATCH_SIZE:-}"
 
 CPU="${CPU:-2}"
-MEMORY="${MEMORY:-8Gi}"
+MEMORY="${MEMORY:-4Gi}"
 # Concurrent tasks per job. A job's deploy must satisfy PARALLELISM x {CPU, MEMORY}
-# within the regional quota: 20 vCPU and 40 GiB total in asia-south1.
-#   PARALLELISM=4 x CPU=2   = 8 vCPU    (<= 20)
-#   PARALLELISM=4 x MEMORY=8Gi = 32 GiB (<= 40)   -> free-tier quota, with headroom.
-# Throughput ~= PARALLELISM x WORKERS accounts in flight. The ~3.5 min dashboard
-# dwell leaves the CPU mostly idle, so WORKERS can safely exceed CPU (oversubscribe).
-# 8 x 4 = ~32 accounts in flight at ~6 min/account -> ~30300 done in ~4 days (~Fri).
+# within the regional quota: 20 vCPU and 40 GiB total per India region.
+#   PARALLELISM=9 x CPU=2      = 18 vCPU  (<= 20)
+#   PARALLELISM=9 x MEMORY=4Gi = 36 GiB   (<= 40)
+# Throughput ~= PARALLELISM accounts in flight (one browser per task, see below).
 # Going faster needs a Cloud Run CPU/Memory quota increase for the region.
-PARALLELISM="${PARALLELISM:-4}"
-# Workers per task. 4 oversubscribes 2 vCPU (fine during the idle dwell); if logins
-# start failing/timing out under load, drop to 3 (gentler, ~a day slower).
-ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-2}"
+PARALLELISM="${PARALLELISM:-9}"
+# Browsers per task. Keep 1 for the download flow: the editor renders with software GL
+# (SwiftShader), and two browsers on 2 vCPU starve it ("Authoring engine did not
+# start", the Download button never mounts, clicks stall; 2026-10-16 diag). The
+# 2026-10-26 local pre-flight with 1 browser went 19/19. 4Gi is ample for one browser
+# (the old "Page crashed" OOM was 4Gi shared by 3). Activation-only runs
+# (ADOBE_STOP_AFTER_LETS_GO=1) never open the editor and can use 3-4.
+ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-1}"
 ADOBE_SCRIPT_ACCOUNT_LIMIT="${ADOBE_SCRIPT_ACCOUNT_LIMIT:-21}"
 ADOBE_STOP_AFTER_LOGIN="${ADOBE_STOP_AFTER_LOGIN:-1}"
 ADOBE_STOP_AFTER_LETS_GO="${ADOBE_STOP_AFTER_LETS_GO:-0}"
@@ -143,6 +148,49 @@ fi
 
 HEADER="$(head -n 1 "$INPUT_CSV")"
 
+# ── Chat webhook → Secret Manager ─────────────────────────────────────────────
+# The tasks post to Chat themselves (scripts/run-notify.mjs), so they need the webhook.
+# It reaches them from Secret Manager, not as a plain env var, which anyone able to view
+# the job could read. Synced from .env.local on every launch (a new version only when the
+# value changed), so rotating the webhook is just editing .env.local.
+CHAT_SECRET="${CHAT_SECRET:-adobe-chat-webhook}"
+sync_chat_secret() {
+  [[ -n "${GOOGLE_CHAT_WEBHOOK_URL:-}" ]] || return 1
+  # run-india-2region.sh launches both regions at once, so the create and the policy
+  # update below can race with the other launcher: tolerate "already exists" and retry.
+  if ! gcloud secrets describe "$CHAT_SECRET" --project="$PROJECT_ID" >/dev/null 2>&1; then
+    gcloud secrets create "$CHAT_SECRET" --replication-policy=automatic \
+      --project="$PROJECT_ID" >/dev/null 2>&1 \
+      || gcloud secrets describe "$CHAT_SECRET" --project="$PROJECT_ID" >/dev/null 2>&1 \
+      || return 1
+  fi
+  if [[ "$(gcloud secrets versions access latest --secret="$CHAT_SECRET" --project="$PROJECT_ID" 2>/dev/null)" \
+        != "$GOOGLE_CHAT_WEBHOOK_URL" ]]; then
+    printf '%s' "$GOOGLE_CHAT_WEBHOOK_URL" \
+      | gcloud secrets versions add "$CHAT_SECRET" --data-file=- --project="$PROJECT_ID" >/dev/null || return 1
+  fi
+  local attempt
+  for attempt in 1 2 3; do
+    gcloud secrets add-iam-policy-binding "$CHAT_SECRET" \
+      --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+      --role="roles/secretmanager.secretAccessor" \
+      --project="$PROJECT_ID" >/dev/null 2>&1 && return 0
+    sleep 3
+  done
+  return 1
+}
+if sync_chat_secret; then
+  SECRET_FLAGS=(--set-secrets="GOOGLE_CHAT_WEBHOOK_URL=${CHAT_SECRET}:latest")
+  CHAT_IN_TASKS="on (Secret Manager: ${CHAT_SECRET})"
+else
+  SECRET_FLAGS=(--clear-secrets)
+  CHAT_IN_TASKS="off"
+  if [[ -n "${GOOGLE_CHAT_WEBHOOK_URL:-}" ]]; then
+    log "WARN: could not store the Chat webhook in Secret Manager (API not enabled? re-run scripts/setup-run.sh)."
+    log "      Tasks will run without Chat updates; the launcher still posts its own."
+  fi
+fi
+
 log "============================================================"
 log "Adobe Playwright — Batch Run"
 log "Project:       ${PROJECT_ID}"
@@ -158,6 +206,7 @@ log "Stop after login: ${ADOBE_STOP_AFTER_LOGIN}"
 log "PNG uploads:   ${DOWNLOADS_GCS_URI} (off = downloads recorded in the logs only)"
 log "Test retries:  ${ADOBE_TEST_RETRIES}"
 log "Save reports:  ${SAVE_ARTIFACTS} (CSV/HTML reports only; false = logs only)"
+log "Chat in tasks: ${CHAT_IN_TASKS}"
 log "============================================================"
 
 # Rough duration: waves of PARALLELISM tasks, each task ADOBE_SCRIPT_ACCOUNT_LIMIT accounts
@@ -247,8 +296,8 @@ ADOBE_TEST_RETRIES=${ADOBE_TEST_RETRIES},\
 ADOBE_REGION=${REGION},\
 ADOBE_PARALLELISM=${PARALLELISM},\
 ADOBE_NOTIFY_THREAD=${GOOGLE_CHAT_THREAD_KEY},\
-GOOGLE_CHAT_WEBHOOK_URL=${GOOGLE_CHAT_WEBHOOK_URL:-},\
-SAVE_ARTIFACTS=${SAVE_ARTIFACTS}"
+SAVE_ARTIFACTS=${SAVE_ARTIFACTS}" \
+      "${SECRET_FLAGS[@]}"
 
     notify "▶️ *${batch_label} launched* — ${REGION}
 📊 ${batch_rows} accounts across ${tasks} tasks

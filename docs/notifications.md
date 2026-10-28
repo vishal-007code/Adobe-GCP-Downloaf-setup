@@ -12,10 +12,14 @@ the Docker image:
 GOOGLE_CHAT_WEBHOOK_URL='https://chat.googleapis.com/v1/spaces/…/messages?key=…&token=…'
 ```
 
-`scripts/run-batches.sh` (and `run-india-2region.sh`, which calls it) loads it and passes
-it to the Cloud Run tasks as an env var. Without it, nothing is posted. The image must be
-built from this version (`bash scripts/setup-run.sh`), because the tasks run
-`scripts/run-notify.mjs`.
+`scripts/run-batches.sh` (and `run-india-2region.sh`, which calls it) loads it and stores
+it in Secret Manager as `adobe-chat-webhook` (a new version only when the value changed),
+grants the runtime service account read access, and mounts it into the tasks as the
+`GOOGLE_CHAT_WEBHOOK_URL` env var. It never appears in plain text in the job's
+configuration. Without it, nothing is posted. `bash scripts/setup-run.sh` enables the
+Secret Manager API, and the image must be built from this version, because the tasks run
+`scripts/run-notify.mjs`. If the secret cannot be stored, the launcher logs a warning and
+the tasks run without Chat updates; the launcher still posts its own messages.
 
 ## What gets posted
 

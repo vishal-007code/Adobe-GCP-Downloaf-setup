@@ -21,7 +21,7 @@
 # tmp/missing-downloads.csv (accounts to run again).
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null | tr -d '\r')}"
 JOB_PREFIX="${JOB_PREFIX:-adobe-login}"
 REGION="${REGION:-}"
 SINCE="${SINCE:-$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)}"

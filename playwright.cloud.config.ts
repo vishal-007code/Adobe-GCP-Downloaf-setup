@@ -9,9 +9,10 @@ const adobeRunId = process.env.ADOBE_RUN_ID?.trim() || createAdobeRunId();
 process.env.ADOBE_RUN_ID = adobeRunId;
 
 // Worker count comes from ADOBE_PLAYWRIGHT_WORKERS (set by run-batches.sh / the job
-// env), falling back to legacy WORKERS, then 3.
+// env), falling back to legacy WORKERS, then 1: the software-GL editor needs a whole
+// 2-vCPU task per browser (see run-batches.sh).
 const WORKERS = parseInt(
-  process.env.ADOBE_PLAYWRIGHT_WORKERS ?? process.env.WORKERS ?? '3',
+  process.env.ADOBE_PLAYWRIGHT_WORKERS ?? process.env.WORKERS ?? '1',
   10,
 );
 
