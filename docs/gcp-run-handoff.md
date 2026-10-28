@@ -4,37 +4,53 @@ Self-contained context for a fresh Claude session. Covers what we run on GCP, wh
 it is shaped this way, the exact commands, the free-tier limits that dictate the
 throughput knobs, and every failure mode hit so far.
 
-Documents the **8–14 Aug 2026** run cycle (the second weekly run in this project).
+Last updated **2026-10-28** for the **download flow** (login → Let's Go → postcard →
+PNG export). The measured results in §9 and the retry recipe in §10 come from the
+**8–14 Aug 2026** activation-only cycle and are kept as history.
 
 ---
 
 ## 1. What the automation does
 
 A Playwright/TypeScript suite logs into Adobe with school-issued accounts
-(Bihar ICT + Kendriya Vidyalaya), clicks through to the dashboard, presses
-"Let's Go", and stops. The goal is **activation**: proof that each account
-successfully reached an authenticated Adobe dashboard.
+(Bihar ICT + Kendriya Vidyalaya), reaches the dashboard, dismisses "Let's Go",
+opens a fixed postcard template in the editor and exports it as a PNG. The
+result per account is **Login + Download**, **Login only** or **Login failed**.
+The PNG itself is not kept; the record that the export finished is the proof
+(see `docs/run-report.md`).
 
 - Entry point: `tests/adobe/script.spec.ts`
-- Page logic: `src/pages/adobe.ts`, `src/pages/msProvider.ts`
+- Page logic: `src/pages/adobe.ts`, `src/pages/editorDashboard.ts`, `src/pages/msProvider.ts`
 - Reporting / markers: `src/adobe/reporter.ts`, `src/adobe/report-files.ts`
-- Cloud config: `playwright.cloud.config.ts`, `Dockerfile`
+- Cloud config: `playwright.cloud.config.ts` (software GL via SwiftShader, no GPU), `Dockerfile`
 
-Runs stop right after "Let's Go" (`ADOBE_STOP_AFTER_LETS_GO=1`), so an account
-takes ~60–90s instead of ~6 min.
+An account takes ~4 min on Cloud Run (login ~30s, editor open ~50–100s, export
+~60–180s under software GL). Inside a run each account gets up to 3 download
+attempts with an editor reload between them, then one full retry with a fresh
+login (`ADOBE_TEST_RETRIES`, default 1).
+
+`ADOBE_STOP_AFTER_LETS_GO=1` gives the old activation-only run (~60–90s per
+account, no editor), which can use 3–4 browsers per task.
 
 ### Log markers (the entire results pipeline depends on these)
 
 ```
-[ADOBE_LOGIN_OK]     email=... url=... elapsed_ms=... at=...
-[ADOBE_LOGIN_FAIL]   email=... elapsed_ms=... reason="..."
-[ADOBE_LETSGO_OK]    email=... via=api|ui owner_entity=... status=...
-[ADOBE_RESULT]       status=passed|failed email=... logged_in=yes|no [step=... reason=...]
-[ADOBE_TASK_SUMMARY] task=N of=M attempted=N login_ok=N login_fail=N passed=N failed=N skipped=N
+[ADOBE_LOGIN_OK]       email=... url=... elapsed_ms=... at=...
+[ADOBE_LOGIN_FAIL]     email=... elapsed_ms=... reason="..."
+[ADOBE_LETSGO_OK]      email=... via=api|ui owner_entity=... status=...
+[ADOBE_RESULT]         status=passed|failed email=... logged_in=yes|no downloaded=yes|no
+                       outcome=login_download|login_only|no_login [login_s= editor_open_s=
+                       export_s= editor_reloads=] [step=... reason=...]
+[ADOBE_TASK_SUMMARY]   task=N of=M attempted=N login_ok=N login_fail=N passed=N failed=N skipped=N downloaded=N
+[ADOBE_RETRY]          email=... attempt=1/2 step=... reason=...   (a test retry follows; not a final result)
+[ADOBE_DOWNLOAD_RETRY] / [ADOBE_DOWNLOAD_RECOVERED] / [ADOBE_DOWNLOAD_DIAG]   editor reloads
+[ADOBE_CLICK_FALLBACK] the Download click stalled and was dispatched instead
+[ADOBE_SKIP_TOUR]      the editor's tour overlay was dismissed
 ```
 
 `logged_in` is tracked separately from `status` on purpose: an account can log in
-(= activated, which is what we report) and still fail a later step.
+and still fail a later step. `downloaded=yes` is what separates Login + Download
+from Login only.
 
 ---
 
@@ -55,12 +71,14 @@ xlsx (local)  ->  Email,Password CSV  ->  Cloud Shell
                                                               |
                                                     stdout -> Cloud Logging
                                                               |
-                                              count-logins.sh / build-resume-csv.sh
+                                          build-run-report.sh / count-logins.sh
 ```
 
 Components used: **Cloud Run Jobs** (execution), **Artifact Registry** (image),
-**Cloud Build** (image build), **Cloud Storage** (account CSV in, optional
-reports out), **Cloud Logging** (the results database, in practice).
+**Cloud Build** (image build), **Cloud Storage** (account CSV in, Chat
+coordination markers, optional reports out), **Secret Manager** (the Chat
+webhook), **Cloud Logging** (the results database, in practice). The tasks post
+their own progress to Google Chat; see `docs/notifications.md`.
 
 Regions: **asia-south1 (Mumbai)** and **asia-south2 (Delhi)**. Two regions is a
 throughput trick, not redundancy — see the next section.
@@ -75,19 +93,27 @@ fact drives the whole configuration:
 | Knob | Value | Why |
 |---|---|---|
 | `CPU` | 2 | per task |
-| `MEMORY` | 4Gi | per task |
-| `PARALLELISM` | 8 | 8 x 2 = 16 vCPU, 8 x 4Gi = 32 GiB — fits 20/40 with headroom |
-| `ADOBE_PLAYWRIGHT_WORKERS` | 4 | oversubscribes 2 vCPU; safe because the flow is mostly network wait |
+| `MEMORY` | 4Gi | per task; ample for one browser |
+| `PARALLELISM` | 9 | 9 x 2 = 18 vCPU, 9 x 4Gi = 36 GiB — fits 20/40 |
+| `ADOBE_PLAYWRIGHT_WORKERS` | 1 | the software-GL editor needs the whole 2 vCPU; 2 browsers starve it |
 | `ADOBE_SCRIPT_ACCOUNT_LIMIT` | 21 | accounts per task, so tasks = ceil(rows / 21) |
-| `TASK_TIMEOUT` | 8h | a task of 21 accounts needs ~6–7 min; 8h is slack |
+| `TASK_TIMEOUT` | 8h | 21 accounts x ~4 min ≈ 1.5h, more with retries; 8h is slack |
+
+These are the defaults of `run-batches.sh` and `run-india-2region.sh`. The August
+activation-only cycle used 8 tasks x 4 browsers, which is fine without the editor
+but starves it: with 2 browsers per 2 vCPU Adobe logs "Authoring engine did not
+start" and the Download button never mounts (2026-10-16 diag).
 
 Consequences:
 
 - **Two jobs in one region do not go faster than one.** They split the same
-  20 vCPU. To actually double throughput you must use a *second region*.
-- Peak concurrency per region is `PARALLELISM x WORKERS` = ~32 accounts in flight.
+  20 vCPU. To actually double throughput you must use a *second region*, and only
+  the two India regions work (other regions get a captcha on the Google login).
+- Peak concurrency per region is `PARALLELISM x WORKERS` = ~9 accounts in flight.
 - A deploy that exceeds the quota fails at deploy time, or the execution sits at
   `runningCount: 0` forever.
+- Watch the first run for `page.goto: Page crashed` (out of memory). If it shows
+  up, use `MEMORY=6Gi PARALLELISM=6`.
 
 **Other free-tier items to watch:**
 
@@ -103,13 +129,13 @@ Consequences:
 **Project rotation:** we work inside a fresh GCP project per cycle rather than one
 long-lived project. Observed so far:
 
-- `project-517cd71a-7c2f-4e1b-af2` — earlier runs; still the hardcoded default in
-  several scripts.
-- `project-e075c147-6467-458f-a8f` — current (8–14 Aug cycle).
+- `project-517cd71a-7c2f-4e1b-af2` — earlier runs.
+- `project-e075c147-6467-458f-a8f` — 8–14 Aug cycle.
+- `project-8606ec18-5b16-4826-af3` — Aug–Oct; no longer accessible.
 
-**Because of that rotation, always pass `PROJECT_ID` explicitly.** The script
-defaults point at the *old* project and fail with
-`Permission denied on resource project ...` or `projects/... does not exist`.
+Because of that rotation, no script hardcodes a project any more: `PROJECT_ID`
+defaults to the active gcloud project (`gcloud config set project <id>`), and a
+script stops with a clear message when neither is set.
 
 Cloud Shell account for this cycle: `deekshachaturvedihr@gmail.com`, repo checked
 out at `~/Adobe-Typescript`.
@@ -125,7 +151,7 @@ REGION=asia-south1 bash scripts/setup-run.sh
 ```
 
 `scripts/setup-run.sh` is idempotent: enable APIs (artifactregistry, cloudbuild,
-storage, run, iam) → create SA `playwright-runner@<project>` → create Artifact
+storage, run, iam, secretmanager) → create SA `playwright-runner@<project>` → create Artifact
 Registry repo `playwright-jobs` → create bucket `gs://<project>-adobe-accounts` →
 IAM bindings (SA gets objectViewer + objectCreator + logWriter; the serverless
 robot gets serviceAccountUser) → grant the **Cloud Build** SA
@@ -260,8 +286,8 @@ What `scripts/run-batches.sh` does: sources `.env.local` → auto-detects
 `TOTAL_ACCOUNTS` from the CSV → splits into batches (`BATCH_SIZE` defaults to the
 full count, so ONE job) → uploads each batch CSV to
 `gs://<bucket>/accounts/<RUN_ID>/batch-NN.csv` → `gcloud run jobs deploy` with
-`tasks = ceil(rows/21)` and `--max-retries=0` → `gcloud run jobs execute --wait` →
-posts Google Chat notifications per batch.
+`tasks = ceil(rows/21)` and `--max-retries=0` → `gcloud run jobs execute --wait`.
+Before deploying it syncs the Chat webhook from `.env.local` into Secret Manager.
 
 **Naming rule: week-stamp `BASE_JOB_NAME`.** Job names persist across weeks;
 redeploying `adobe-kv` would overwrite last week's `adobe-kv-batch-01` and mix both
@@ -269,10 +295,15 @@ weeks' logs under one name, which breaks every `JOB_PREFIX` query. `RUN_ID` must
 also be unique — it namespaces the GCS object paths.
 
 **Notifications** need `GOOGLE_CHAT_WEBHOOK_URL` in `.env.local`, which is
-git-ignored and therefore absent from a fresh clone. Without it the run works
-silently. Notifications fire per *batch* only — per task would blow the Chat rate
-limit at thousands of tasks. `scripts/notify-progress.sh` gives interval-based
-aggregate updates.
+git-ignored and therefore absent from a fresh clone: create it in Cloud Shell
+before launching. Without it the run works silently. The tasks post started,
+progress every 10%, one alert per problem kind and the final summary themselves,
+so updates keep coming even if the Cloud Shell session dies. Details in
+`docs/notifications.md`.
+
+**Pre-flight on a laptop** before spending credit: `bash scripts/run-local-job.sh`
+runs the container's own task script on a few accounts (2026-10-26: 19/19 Login +
+Download). Keep the laptop awake; a sleep mid-run shows up as fake test timeouts.
 
 ---
 
@@ -284,7 +315,7 @@ gcloud run jobs executions list --job=<job>-batch-01 --region=<region> --project
   --format='table(name,status.runningCount,status.succeededCount,status.failedCount,status.completionTime)'
 ```
 
-`runningCount` should reach `PARALLELISM` (8). Stuck at 0 = quota block, not a code
+`runningCount` should reach `PARALLELISM` (9). Stuck at 0 = quota block, not a code
 bug. Complete = `runningCount: 0` **and** a populated `completionTime`.
 
 Login tallies via `scripts/count-logins.sh` (sums `[ADOBE_TASK_SUMMARY]`):
@@ -302,7 +333,21 @@ several batches and regions into one total.
 
 ---
 
-## 9. Measured results, 8–14 Aug cycle
+## 9. Measured results
+
+### Download flow (Oct 2026, laptop, cloud config)
+
+| What | Result |
+|---|---|
+| Local job pre-flight, 1 browser (2026-10-26) | 19/19 Login + Download |
+| Login | ~30s (up to ~90s when the network is slow) |
+| Editor open (postcard → Download button) | ~35–130s, one account needed a reload (202s) |
+| Export (Download → PNG saved) | ~60–185s |
+| Planning figure | ~230s per account per task; 9 tasks per region |
+
+Not yet measured on real Cloud Run CPUs: the first GCP run is the test.
+
+### Activation only, 8–14 Aug cycle
 
 | Job | Region | Accounts | Tasks | Window (UTC) | Logged in | Rate |
 |---|---|---|---|---|---|---|
@@ -324,6 +369,12 @@ reputation / Adobe-side rate limiting) before assuming retries will close it.
 ---
 
 ## 10. Retry flow for failed accounts
+
+**Download flow:** `bash scripts/build-run-report.sh` (see `docs/run-report.md`)
+writes `tmp/missing-downloads.csv`, the accounts without a download minus the ones
+whose credentials were rejected (those go to `tmp/dead-accounts.csv`). Re-run it
+with `INPUT_CSV=tmp/missing-downloads.csv bash scripts/run-batches.sh`. The rest of
+this section is the August activation-only recipe.
 
 `scripts/build-resume-csv.sh` + `build-resume-csv.mjs` diff the input CSV against
 `[ADOBE_RESULT] status=passed` markers; anything not passed goes to a resume CSV.
@@ -377,8 +428,8 @@ small enough to ignore.
 ## 11. Gotchas hit in practice
 
 1. **Wrong `PROJECT_ID`** → `Permission denied on resource project ...` or
-   `projects/... does not exist`. Script defaults point at the *old* project.
-   Always export `PROJECT_ID`.
+   `projects/... does not exist`. Scripts use the active gcloud project; check it
+   with `gcloud config get-value project` or export `PROJECT_ID`.
 2. **Empty results with no error** → the job-name prefix does not match. Enumerate
    with `gcloud run jobs list --region=<r>` per region; that is authoritative.
 3. **Using `gcloud logging read --limit=N` to discover job names is misleading** —
@@ -410,20 +461,28 @@ small enough to ignore.
     accounts that reached the dashboard wait. Earlier failures (provider password
     screen) never emit it. `MODE=summary` is authoritative. The gap between the two
     tells you how many died pre-dashboard.
+15. **More browsers per task is slower, not faster, for the download flow.** The
+    editor renders on the CPU (SwiftShader); two browsers on 2 vCPU leave it unable
+    to boot. Scale with `PARALLELISM` and regions, never with
+    `ADOBE_PLAYWRIGHT_WORKERS`.
+16. **`[ADOBE_RETRY]` lines are not failures.** They mark an attempt that
+    Playwright re-runs; only `[ADOBE_RESULT]` is an account's final outcome.
 
 ---
 
 ## 12. Improvements for the next cycle
 
-1. **Launch with `SAVE_ARTIFACTS=true`.** Per-account results then land in
-   `gs://<project>-adobe-accounts/adobe-runs/<RUN_ID>/...`, and counting or
-   building a retry list becomes `gcloud storage cat` + `awk` — seconds instead of
-   a log crawl. Single biggest quality-of-life fix.
-2. **Plan at 640 accounts/hr/region**, and split by count across both regions from
-   the start.
-3. **Investigate the 54–64% cloud rate vs 84–86% local** before spending ~15h on
-   retries. Sample `[ADOBE_RESULT] status=failed` reasons with `--limit=800`; if
-   they are credential errors, no amount of retrying helps.
+1. **Report with `build-run-report.sh`.** It builds the per-account report and
+   the re-run list straight from the logs (`docs/run-report.md`).
+   `SAVE_ARTIFACTS=true` is still an option if log pulls get too slow.
+2. **Plan at ~230s per account per task** for the download flow (9 tasks per
+   region ≈ 140 accounts/hr/region), and split by count across both regions from
+   the start. Re-measure from the first GCP run's timings.
+3. **Investigate the 54–64% cloud login rate vs 84–86% local** (August data, at 4
+   browsers per 2 vCPU). Sample `[ADOBE_LOGIN_FAIL]` and `[ADOBE_RESULT]
+   status=failed` reasons from the first run: timeouts point to CPU (fixable by
+   sizing), "browser may not be secure"/captcha points to Google flagging cloud
+   IPs, and credential errors cannot be fixed by retrying.
 4. **Do not rely on shell chaining** for sequential jobs — keep the Cloud Shell tab
    alive in tmux, or hand off manually.
 5. **Consider a Cloud Run quota increase** for asia-south1/asia-south2 — raising
@@ -462,17 +521,22 @@ SINCE=<rfc3339> REGION=<r> JOB_PREFIX=<prefix> INPUT_CSV=<in> OUTPUT_CSV=<out> b
 | Script | Purpose |
 |---|---|
 | `scripts/setup-run.sh` | one-time per project: APIs, SA, registry, bucket, IAM, first build |
-| `scripts/run-batches.sh` | the launcher: split, upload, deploy, execute, notify |
+| `scripts/run-batches.sh` | the launcher: split, upload, Chat secret, deploy, execute |
 | `scripts/run-india-2region.sh` | merge + dedupe + 50/50 split across both regions in one call |
+| `scripts/run-cloud-batch.sh` | the container entrypoint (one Cloud Run task) |
+| `scripts/run-notify.mjs` | Chat updates posted from inside the tasks |
+| `scripts/run-local-job.sh` | laptop pre-flight running the same task script |
+| `scripts/build-run-report.sh` + `.mjs` | per-account Login + Download / Login only report, re-run list |
 | `scripts/count-logins.sh` | summary / accounts / failures tallies from logs |
-| `scripts/build-resume-csv.sh` + `.mjs` | build a retry CSV of not-passed accounts |
-| `scripts/notify-progress.sh` | interval aggregate Google Chat progress |
+| `scripts/build-resume-csv.sh` + `.mjs` | activation-era retry CSV of not-passed accounts |
+| `scripts/notify-progress.sh` | interval aggregate Google Chat progress (older, launcher-side) |
 | `scripts/dispatch-job.sh` | single-job deploy + execute (simpler path) |
 | `scripts/estimate-cloud-run-cost.mjs` | cost estimate |
 
 ### Related docs in this repo
 
 `docs/gcp-setup.md` (full project setup), `docs/gcs-setup.md` (bucket/IAM),
-`docs/gcp-cloud-run-job.md` (job basics), `docs/run-22k-login.md` and
+`docs/gcp-cloud-run-job.md` (job basics), `docs/run-report.md` (the per-account
+report), `docs/notifications.md` (Chat), `docs/run-22k-login.md` and
 `docs/run-38k-login.md` (earlier runbooks), `docs/source_of_truth.md` (flow
 reference), `cmds.md` (ad-hoc command scratchpad).
