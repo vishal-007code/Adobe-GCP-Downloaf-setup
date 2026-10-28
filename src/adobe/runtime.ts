@@ -4,6 +4,7 @@ export const ADOBE_ACCOUNT_ATTACHMENT = 'adobe-account';
 export const ADOBE_STEP_ATTACHMENT = 'adobe-step';
 export const ADOBE_LINK_ATTACHMENT = 'adobe-link';
 export const ADOBE_LOGIN_ATTACHMENT = 'adobe-login';
+export const ADOBE_DOWNLOAD_ATTACHMENT = 'adobe-download';
 export const ADOBE_NO_FRESH_ACCOUNTS_REASON = 'No fresh accounts available';
 
 export const ADOBE_RESULTS_HEADERS = [
@@ -21,6 +22,19 @@ export const ADOBE_RESULTS_HEADERS = [
   'failure_reason',
   'duration_ms',
   'published_link',
+  // Where this account's PNG ended up: the gs:// object when uploads are on, else the
+  // local ./downloads path. Empty = no download.
+  'download_file',
+  // 'yes' once the PNG export finished for this account (the PNG need not be kept).
+  'downloaded',
+  // login_download | login_only | no_login (| skipped) — the account's end state.
+  'outcome',
+  // Timings in seconds: test start → dashboard, postcard navigation → Download button
+  // enabled (reloads included), Download button → PNG saved. Empty when not reached.
+  'login_s',
+  'editor_open_s',
+  'export_s',
+  'editor_reloads',
 ] as const;
 
 export const ADOBE_CONSUMED_HEADERS = ['email', 'consumed_at'] as const;

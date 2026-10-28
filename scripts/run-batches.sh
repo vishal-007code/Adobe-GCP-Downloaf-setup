@@ -59,6 +59,13 @@ ADOBE_STRICT_LETS_GO="${ADOBE_STRICT_LETS_GO:-1}"
 ADOBE_VIDEO_MODE="${ADOBE_VIDEO_MODE:-off}"
 ADOBE_DEBUG_ARTIFACTS="${ADOBE_DEBUG_ARTIFACTS:-0}"
 SAVE_ARTIFACTS="${SAVE_ARTIFACTS:-false}"
+# PNGs are not kept by default (off): each download is recorded as downloaded=yes in the
+# account's [ADOBE_RESULT] log line, and `bash scripts/build-run-report.sh` turns those
+# into the per-account report. Set DOWNLOADS_GCS_URI=gs://${REPORTS_BUCKET}/downloads to
+# also upload every PNG as <email>.png.
+DOWNLOADS_GCS_URI="${DOWNLOADS_GCS_URI:-off}"
+# Re-run a failed account once (fresh login) inside the same task before giving up on it.
+ADOBE_TEST_RETRIES="${ADOBE_TEST_RETRIES:-1}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-8h}"
 BASE_JOB_NAME="${BASE_JOB_NAME:-adobe-login-flow}"
 
@@ -74,14 +81,23 @@ log() { echo "[BATCHES][$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 
 # Push a Chat message. Best-effort: a webhook hiccup must NEVER abort a multi-day
 # run, and a missing webhook is simply a no-op (the sender exits 0 when unset).
-# Per BATCH only — never per task or per account; ~4k tasks would hit the Chat
-# rate limit. Aggregate progress comes from scripts/notify-progress.sh.
+# The launcher posts only the trigger and launcher-side failures. Started / progress /
+# alerts / final summary come from the tasks themselves (scripts/run-notify.mjs), so
+# they arrive even when this launcher is closed or the laptop sleeps.
+#   notify       → reply in the run's thread (one thread per run, shared with the tasks)
+#   notify_alert → new top-level message, so it notifies
 GOOGLE_CHAT_THREAD_KEY="${GOOGLE_CHAT_THREAD_KEY:-adobe-run-${RUN_ID:-$(date -u +%Y%m%d)}}"
 notify() {
   [[ -n "${GOOGLE_CHAT_WEBHOOK_URL:-}" ]] || return 0
   GOOGLE_CHAT_WEBHOOK_URL="$GOOGLE_CHAT_WEBHOOK_URL" \
   GOOGLE_CHAT_MESSAGE="$1" \
   GOOGLE_CHAT_THREAD_KEY="$GOOGLE_CHAT_THREAD_KEY" \
+  node scripts/send-google-chat-update.mjs >/dev/null 2>&1 || true
+}
+notify_alert() {
+  [[ -n "${GOOGLE_CHAT_WEBHOOK_URL:-}" ]] || return 0
+  GOOGLE_CHAT_WEBHOOK_URL="$GOOGLE_CHAT_WEBHOOK_URL" \
+  GOOGLE_CHAT_MESSAGE="$1" \
   node scripts/send-google-chat-update.mjs >/dev/null 2>&1 || true
 }
 
@@ -139,13 +155,25 @@ log "Parallelism:   ${PARALLELISM} (tasks running at once per job)"
 log "Workers:       ${ADOBE_PLAYWRIGHT_WORKERS}"
 log "Acct limit:    ${ADOBE_SCRIPT_ACCOUNT_LIMIT}"
 log "Stop after login: ${ADOBE_STOP_AFTER_LOGIN}"
-log "Save to GCS:   ${SAVE_ARTIFACTS} (false = logs only, no bucket uploads)"
+log "PNG uploads:   ${DOWNLOADS_GCS_URI} (off = downloads recorded in the logs only)"
+log "Test retries:  ${ADOBE_TEST_RETRIES}"
+log "Save reports:  ${SAVE_ARTIFACTS} (CSV/HTML reports only; false = logs only)"
 log "============================================================"
 
-notify "🚀 *Adobe run started* — ${REGION}
-📊 ${TOTAL_ACCOUNTS} accounts | batch size ${BATCH_SIZE}
-⚙️ parallelism ${PARALLELISM} × ${ADOBE_PLAYWRIGHT_WORKERS} workers = ~$(( PARALLELISM * ADOBE_PLAYWRIGHT_WORKERS )) in flight
-🆔 run ${RUN_ID}"
+# Rough duration: waves of PARALLELISM tasks, each task ADOBE_SCRIPT_ACCOUNT_LIMIT accounts
+# shared by its workers, at SECONDS_PER_ACCOUNT (~230s measured for the download flow on
+# 2 vCPU per browser; login-only is ~90s).
+SECONDS_PER_ACCOUNT="${SECONDS_PER_ACCOUNT:-$([[ "$ADOBE_STOP_AFTER_LETS_GO" == "1" ]] && echo 90 || echo 230)}"
+total_tasks=$(( (TOTAL_ACCOUNTS + ADOBE_SCRIPT_ACCOUNT_LIMIT - 1) / ADOBE_SCRIPT_ACCOUNT_LIMIT ))
+est_min=$(( ( (total_tasks + PARALLELISM - 1) / PARALLELISM ) * ( (ADOBE_SCRIPT_ACCOUNT_LIMIT + ADOBE_PLAYWRIGHT_WORKERS - 1) / ADOBE_PLAYWRIGHT_WORKERS ) * SECONDS_PER_ACCOUNT / 60 ))
+notify "🚀 *Adobe run triggered* — ${REGION}
+👤 ${TOTAL_ACCOUNTS} accounts · 🧩 ${total_tasks} tasks (${ADOBE_SCRIPT_ACCOUNT_LIMIT} accounts each)
+🎯 $([[ "$ADOBE_STOP_AFTER_LETS_GO" == "1" ]] && echo "Activation only (login)" || echo "Login + Download")
+⚙️ ${PARALLELISM} tasks at a time × ${ADOBE_PLAYWRIGHT_WORKERS} browser(s) · ${CPU} vCPU / ${MEMORY} per task
+⏳ rough estimate ~$(( est_min / 60 ))h $(( est_min % 60 ))m
+🖼️ image ${IMAGE_URI##*/}
+🆔 run ${RUN_ID}
+Updates for this run follow in this thread; problems and the final summary post as new messages."
 
 # ── Split CSV into batches ────────────────────────────────────────────────────
 log "Splitting CSV into batches..."
@@ -214,11 +242,17 @@ ADOBE_LETS_GO_APPEAR_TIMEOUT_MS=${ADOBE_LETS_GO_APPEAR_TIMEOUT_MS},\
 ADOBE_STRICT_LETS_GO=${ADOBE_STRICT_LETS_GO},\
 ADOBE_VIDEO_MODE=${ADOBE_VIDEO_MODE},\
 ADOBE_DEBUG_ARTIFACTS=${ADOBE_DEBUG_ARTIFACTS},\
+ADOBE_DOWNLOADS_GCS_URI=${DOWNLOADS_GCS_URI},\
+ADOBE_TEST_RETRIES=${ADOBE_TEST_RETRIES},\
+ADOBE_REGION=${REGION},\
+ADOBE_PARALLELISM=${PARALLELISM},\
+ADOBE_NOTIFY_THREAD=${GOOGLE_CHAT_THREAD_KEY},\
+GOOGLE_CHAT_WEBHOOK_URL=${GOOGLE_CHAT_WEBHOOK_URL:-},\
 SAVE_ARTIFACTS=${SAVE_ARTIFACTS}"
 
     notify "▶️ *${batch_label} launched* — ${REGION}
 📊 ${batch_rows} accounts across ${tasks} tasks
-🆔 job ${job_name}"
+🆔 job ${job_name} — waiting for the first task to start"
 
     step "Executing ${job_name} (waiting for completion)..."
     started_at=$(date -u +%s)
@@ -227,13 +261,13 @@ SAVE_ARTIFACTS=${SAVE_ARTIFACTS}"
       --project="${PROJECT_ID}" \
       --wait
     then
-      notify "✅ *${batch_label} finished* — ${REGION}
-📊 ${batch_rows} accounts | took $(( ($(date -u +%s) - started_at) / 60 ))m
-Run \`MODE=summary bash scripts/count-logins.sh\` for the login tally."
-      step "Done."
+      # The tasks post the final summary themselves (run-notify.mjs).
+      step "Done in $(( ($(date -u +%s) - started_at) / 60 ))m."
     else
-      notify "❌ *${batch_label} FAILED* — ${REGION}
-🆔 job ${job_name} — check ${LOG_DIR}/${batch_label}.log"
+      notify_alert "❌ *${batch_label} execution FAILED* — ${REGION}
+🆔 job ${job_name} after $(( ($(date -u +%s) - started_at) / 60 ))m
+Some tasks crashed, timed out or were never scheduled (quota?). Check:
+\`gcloud run jobs executions list --job=${job_name} --region=${REGION}\`"
       step "FAILED."
       exit 1
     fi
@@ -277,9 +311,6 @@ Logs: ${LOG_DIR}"
   exit 1
 fi
 
-notify "🏁 *Adobe run complete* — ${REGION}
-📊 ${TOTAL_ACCOUNTS} accounts across ${#BATCH_FILES[@]} batch(es)
-🆔 run ${RUN_ID}
-Login tally: \`MODE=summary bash scripts/count-logins.sh\`"
+log "All batches finished; the tasks posted their final summary to Chat."
 
 log "All batches completed successfully."

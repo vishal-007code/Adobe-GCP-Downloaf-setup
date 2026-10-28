@@ -105,10 +105,19 @@ retry_iam gcloud storage buckets add-iam-policy-binding "gs://${ACCOUNTS_BUCKET}
   --role="roles/storage.objectViewer" \
   --project="${PROJECT_ID}"
 
-log "Granting SA bucket write access (reports)..."
+log "Granting SA bucket write access (reports, and PNGs when DOWNLOADS_GCS_URI is set)..."
 retry_iam gcloud storage buckets add-iam-policy-binding "gs://${REPORTS_BUCKET}" \
   --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
   --role="roles/storage.objectCreator" \
+  --project="${PROJECT_ID}"
+
+# The PNG upload uses `gcloud storage cp --no-clobber`, which reads the destination to
+# skip an account whose PNG already exists. Same bucket as above by default (then this
+# is a no-op); needed when REPORTS_BUCKET is a separate bucket.
+log "Granting SA read access on the reports bucket (no-clobber check)..."
+retry_iam gcloud storage buckets add-iam-policy-binding "gs://${REPORTS_BUCKET}" \
+  --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+  --role="roles/storage.objectViewer" \
   --project="${PROJECT_ID}"
 
 log "Granting SA logging permission..."

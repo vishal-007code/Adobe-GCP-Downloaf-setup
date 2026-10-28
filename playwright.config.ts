@@ -21,6 +21,9 @@ const BULK = true;
 // workers contend and page loads slow down, pushing steps toward their timeouts.
 // 4-6 is the realistic range on a 6-core/16GB box; tune empirically (see note below).
 const WORKERS = 3;
+// A failed account is re-run this many times (fresh context, new login) before it is
+// reported failed — so flaky logins/editor loads still end with a download. 0 = off.
+const RETRIES = 1;
 // ──────────────────────────────────────────────────────────────────────────
 // GPU MODE — Adobe Express shows "Performance limitations detected" (which stalls
 // the publish/link spinner) when it can't get GPU acceleration.
@@ -91,7 +94,7 @@ export default defineConfig({
         ? adobeDebugSpecPattern
         : /tests[\\/]adobe[\\/].+\.spec\.ts/,
       testIgnore: adobeLowNetworkDebugEnabled ? undefined : adobeDebugSpecPattern,
-      retries: 0,
+      retries: RETRIES,
       use: { ...devices['Desktop Chrome'], ...chromiumUse },
     },
     {
@@ -102,7 +105,7 @@ export default defineConfig({
         ? adobeDebugSpecPattern
         : /tests[\\/]adobe[\\/].+\.spec\.ts/,
       testIgnore: adobeLowNetworkDebugEnabled ? undefined : adobeDebugSpecPattern,
-      retries: 0,
+      retries: RETRIES,
       use: { ...devices['Desktop Firefox'] },
     },
     {

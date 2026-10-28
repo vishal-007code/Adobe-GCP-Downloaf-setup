@@ -33,6 +33,13 @@ export type AdobeResultRow = {
   failure_reason: string;
   duration_ms: string;
   published_link: string;
+  download_file: string;
+  downloaded: string;
+  outcome: string;
+  login_s: string;
+  editor_open_s: string;
+  export_s: string;
+  editor_reloads: string;
 };
 
 export type AdobeConsumedRow = {

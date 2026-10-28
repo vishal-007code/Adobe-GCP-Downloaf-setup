@@ -39,6 +39,13 @@ function toResultValues(row: AdobeResultRow): string[] {
     row.failure_reason,
     row.duration_ms,
     row.published_link ?? '',
+    row.download_file ?? '',
+    row.downloaded ?? '',
+    row.outcome ?? '',
+    row.login_s ?? '',
+    row.editor_open_s ?? '',
+    row.export_s ?? '',
+    row.editor_reloads ?? '',
   ];
 }
 

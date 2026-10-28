@@ -20,6 +20,10 @@ docs
 *.xlsx
 aug-week-csvs
 
+# Secrets — the Chat webhook reaches the tasks as an env var, never inside the image
+.env
+.env.*
+
 # Editor / OS
 .idea
 .vscode

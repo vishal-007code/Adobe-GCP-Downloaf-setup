@@ -7,8 +7,11 @@
 #   [ADOBE_LOGIN_OK]     email=... url=... elapsed_ms=... at=...
 #   [ADOBE_LOGIN_FAIL]   email=... elapsed_ms=... reason="..."
 #   [ADOBE_LETSGO_OK]    email=... via=api|ui owner_entity=... status=...
-#   [ADOBE_RESULT]       status=passed|failed email=... logged_in=yes|no [step=... reason=...]
-#   [ADOBE_TASK_SUMMARY] task=N of=M attempted=N login_ok=N login_fail=N passed=N failed=N skipped=N
+#   [ADOBE_RESULT]       status=passed|failed email=... logged_in=yes|no downloaded=yes|no
+#                        outcome=login_download|login_only|no_login [timings] [step=... reason=...]
+#   [ADOBE_TASK_SUMMARY] task=N of=M attempted=N login_ok=N login_fail=N passed=N failed=N skipped=N downloaded=N
+#
+# For the per-account report (login only vs login + download) use scripts/build-run-report.sh.
 #
 # MODES
 #   summary   (default) Sum the per-task [ADOBE_TASK_SUMMARY] lines. Fast — one log
@@ -100,14 +103,18 @@ case "$MODE" in
       match($0, /login_fail=[0-9]+/)  { f += substr($0, RSTART+11, RLENGTH-11) }
       match($0, /passed=[0-9]+/)      { p += substr($0, RSTART+7,  RLENGTH-7)  }
       match($0, / failed=[0-9]+/)     { x += substr($0, RSTART+8,  RLENGTH-8)  }
+      match($0, /downloaded=[0-9]+/)  { d += substr($0, RSTART+11, RLENGTH-11) }
       END {
         printf "tasks reporting : %d\n", NR
         printf "attempted       : %d\n", a
         printf "LOGGED IN       : %d\n", o
+        printf "  + downloaded  : %d\n", d
+        printf "  login only    : %d\n", o - d
         printf "login failed    : %d\n", f
         printf "test passed     : %d\n", p
         printf "test failed     : %d\n", x
         if (a > 0) printf "login rate      : %.2f%%\n", (o * 100.0) / a
+        if (a > 0) printf "download rate   : %.2f%%\n", (d * 100.0) / a
       }
     ' "$RAW"
     echo

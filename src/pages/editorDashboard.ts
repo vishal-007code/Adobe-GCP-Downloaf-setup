@@ -19,12 +19,39 @@ const MIN_RETRY_BUDGET_MS = 150_000;
 const DOWNLOAD_PANEL_TIMEOUT = 60_000;
 // Time from committing the download to the browser's download event, and nothing else —
 // see the arming comment in downloadDesign. Adobe renders the asset server-side first;
-// the v8 probe measured ~8s for a single-page postcard.
-const DOWNLOAD_RENDER_TIMEOUT = 120_000;
+// the v8 probe measured ~8s for a single-page postcard. Under software GL (cloud config,
+// SwiftShader) the export runs far slower: a 2026-10-14 smoke run timed out at 120s with
+// Adobe's "Almost complete… 90%" export dialog still up, so allow 240s.
+const DOWNLOAD_RENDER_TIMEOUT = 240_000;
 // The share/publish panel is a modal <dialog>, and the v8 probe needed two Escapes to
 // clear the stack (a second dialog sits behind it). A few extra presses are free.
 const PANEL_DISMISS_ATTEMPTS = 4;
 const DOWNLOADS_DIR = './downloads';
+// Per-attempt wait for the editor's top nav (and its Download trigger) to mount. A healthy
+// editor mounts it ~25s after navigation (2026-10-14 trace); the failures that day never
+// mounted it within 120s at all, so time past this is better spent reloading.
+const EDITOR_BOOT_TIMEOUT = 75_000;
+const EDITOR_RELOAD_TIMEOUT = 60_000;
+// Download attempts including the first, i.e. up to two editor reloads.
+const DOWNLOAD_ATTEMPTS = 3;
+
+/** Formats the editor's download panel offers (data-testid="download-<format>"). */
+export type DownloadFormat = 'png' | 'jpg' | 'pdf';
+export const DOWNLOAD_FORMATS: readonly DownloadFormat[] = ['png', 'jpg', 'pdf'];
+
+type DownloadOptions = {
+    /** File format to export. Default 'png', the panel's own default. */
+    format?: DownloadFormat;
+    /** Total attempts, including the first. Default DOWNLOAD_ATTEMPTS. */
+    attempts?: number;
+    /** Called before each retry so the CSV's failed_at_step shows how far it got. */
+    onStep?: (step: string) => void;
+    /** Milliseconds left in the test timeout. Used to decide whether a retry fits. */
+    budgetLeftMs?: () => number;
+    /** Called when the editor's Download button is enabled, i.e. the editor is open.
+     *  `attempt` is 1 for the first load, 2+ after reloads. Used for timing. */
+    onEditorReady?: (attempt: number) => void;
+};
 
 type SharePublishOptions = {
     /** Total attempts, including the first. Default 2 (one retry). */
@@ -48,6 +75,7 @@ export class EditorDashboard {
     readonly downloadTrigger: Locator;
     readonly fileFormatPicker: Locator;
     readonly downloadCommitBtn: Locator;
+    private beforeUnloadHandlerInstalled = false;
 
     constructor(page: Page) {
         this.page = page;
@@ -68,9 +96,9 @@ export class EditorDashboard {
         // with NO accessible name and NO text, inside a shadow root — so it is invisible
         // to getByRole/getByLabel (both returned 0 matches) and absent from page.content().
         this.downloadTrigger = page.locator('[data-testid="editor-download-button"]');
-        // Defaults to PNG, which is what this flow wants, so the picker is never touched.
-        // Kept as a locator because it is the entry point if a format ever needs choosing:
-        // the options are [data-testid="download-png" | download-jpg | download-pdf | download-pdf-print].
+        // Defaults to PNG, so the picker is only touched when another format is asked for
+        // (chooseFileFormat). The options are
+        // [data-testid="download-png" | download-jpg | download-pdf | download-pdf-print].
         this.fileFormatPicker = page.locator('[data-testid="file-format-picker"]');
         this.downloadCommitBtn = page.locator('[data-testid="download-commit-button"]');
     }
@@ -90,9 +118,20 @@ export class EditorDashboard {
         // visible during ANY subsequent action, Playwright clicks it and retries the
         // action. This is the idiomatic fix for intermittent overlays and carries no
         // fixed wait penalty when no tour appears.
+        //
+        // noWaitAfter: without it Playwright waits, after the handler, for "Skip tour" to be
+        // HIDDEN before resuming the action — and when the tour lingers that wait eats the
+        // whole action timeout ("locator.click: Timeout 20000ms exceeded ... waiting for
+        // locator('[data-testid=editor-download-button]')" with the button present and
+        // enabled). 74 of 134 trigger failures in the August CSVs, and again on 2026-10-25.
+        // With it, the action just retries; if the tour is still up the handler fires again.
         await this.page.addLocatorHandler(
             this.page.getByRole('button', { name: 'Skip tour' }),
-            async (locator) => { await locator.click({ timeout: 5000 }).catch(() => { /* tour may close on its own */ }); },
+            async (locator) => {
+                console.log('[ADOBE_SKIP_TOUR] tour overlay seen — clicking Skip tour');
+                await locator.click({ timeout: 5000 }).catch(() => { /* tour may close on its own */ });
+            },
+            { noWaitAfter: true },
         );
 
         // 2. Try to dismiss quick tips / popups (if visible)
@@ -203,17 +242,125 @@ export class EditorDashboard {
      * always constructed against the tab holding the design, so the wrong-tab bug cannot
      * come back the next time the flow changes which tab that is.
      */
-    async downloadDesign(workerIndex: number = 0, accountEmail?: string): Promise<string> {
+    async downloadDesign(workerIndex: number = 0, accountEmail?: string, opts: DownloadOptions = {}): Promise<string> {
+        const { format = 'png', attempts = DOWNLOAD_ATTEMPTS, onStep = () => { /* step reporting optional */ }, budgetLeftMs, onEditorReady } = opts;
+        let lastError: unknown;
+
+        // Retried with an editor RELOAD between attempts. The dominant failure (3 of 8
+        // logged-in accounts in the 2026-10-14 smoke runs; "Download" is the top failed
+        // step across every past report) is the editor whose top nav never mounts: the
+        // canvas draws but the Share/Download buttons stay grey placeholders and
+        // [data-testid="editor-download-button"] never appears. Waiting longer on that
+        // page does not help; remounting the editor is the only recovery available
+        // in-test. A stalled export ("Almost complete… 90%") is retried the same way.
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+            if (attempt > 1) {
+                if (this.page.isClosed()) break;
+                const left = budgetLeftMs?.() ?? Number.POSITIVE_INFINITY;
+                if (left < MIN_RETRY_BUDGET_MS) {
+                    console.log(`downloadDesign: ${Math.round(left / 1000)}s of test budget left, under the ${MIN_RETRY_BUDGET_MS / 1000}s an attempt needs — reporting the original failure`);
+                    break;
+                }
+                console.log(
+                    `[ADOBE_DOWNLOAD_RETRY] email=${accountEmail ?? ''} attempt=${attempt}/${attempts}` +
+                    ` after="${firstLine(lastError).replace(/"/g, "'").slice(0, 160)}"`,
+                );
+                onStep(`Download (after reload ${attempt - 1})`);
+                await this.reloadEditor();
+            }
+
+            try {
+                const filePath = await this.downloadOnce(workerIndex, accountEmail, format, () => onEditorReady?.(attempt));
+                if (attempt > 1) {
+                    console.log(`[ADOBE_DOWNLOAD_RECOVERED] email=${accountEmail ?? ''} attempt=${attempt}/${attempts}`);
+                }
+                return filePath;
+            } catch (error) {
+                lastError = error;
+                if (this.page.isClosed()) break;
+                await this.logEditorState(accountEmail, attempt);
+            }
+        }
+
+        throw lastError;
+    }
+
+    /**
+     * One greppable line describing the editor when a download attempt fails, so a
+     * failure in the Cloud Run logs says WHICH way the editor was broken: no top nav at
+     * all (share_btn=0), nav up but no download trigger (testids lack
+     * editor-download-button), or stuck on an Adobe error/notice (notice=...).
+     *
+     * BEST-EFFORT: never throws; every probe is short and swallowed.
+     */
+    private async logEditorState(accountEmail: string | undefined, attempt: number): Promise<void> {
+        const probe = async <T>(fn: () => Promise<T>, fallback: T): Promise<T> => {
+            try { return await fn(); } catch { return fallback; }
+        };
+        const url = this.page.url().split('?')[0];
+        const shareBtn = await probe(() => this.navSharebtn.count(), -1);
+        const testIds = await probe(
+            () => this.page.locator('[data-testid*="download" i]').evaluateAll(
+                (els) => els.map((el) => el.getAttribute('data-testid') ?? '')),
+            [] as string[],
+        );
+        const notice = await probe(
+            () => this.page.locator('[role="alert"], [role="alertdialog"], dialog[open]').first()
+                .innerText({ timeout: 2_000 }),
+            '',
+        );
+        console.log(
+            `[ADOBE_DOWNLOAD_DIAG] email=${accountEmail ?? ''} attempt=${attempt} url=${url}` +
+            ` share_btn=${shareBtn} download_testids=${[...new Set(testIds)].join('|') || 'none'}` +
+            ` notice="${notice.replace(/\s+/g, ' ').replace(/"/g, "'").trim().slice(0, 120)}"`,
+        );
+    }
+
+    /**
+     * Remount the editor for another download attempt. reload() keeps the current
+     * document URL, and the "Skip tour" locator handler from skipTutorial is registered on
+     * the Page, so it survives the reload.
+     *
+     * BEST-EFFORT: runs while handling a failure; the next attempt's own waits report
+     * anything still wrong.
+     */
+    private async reloadEditor(): Promise<void> {
+        // The editor may hold a "Leave site?" beforeunload prompt while it autosaves.
+        // Playwright auto-DISMISSES dialogs nobody handles, which for beforeunload means
+        // "stay on the page" — the reload would then hang until its timeout. Accept it.
+        if (!this.beforeUnloadHandlerInstalled) {
+            this.beforeUnloadHandlerInstalled = true;
+            this.page.on('dialog', (dialog) => {
+                const settle = dialog.type() === 'beforeunload' ? dialog.accept() : dialog.dismiss();
+                settle.catch(() => { /* dialog already gone */ });
+            });
+        }
+
+        await this.page.keyboard.press('Escape').catch(() => { /* nothing focused */ });
+        await this.page.reload({ waitUntil: 'load', timeout: EDITOR_RELOAD_TIMEOUT }).catch((error) => {
+            console.log(`reloadEditor: reload did not settle — ${firstLine(error)}`);
+        });
+    }
+
+    /** One download attempt: open the download panel, pick the format, commit, save the file. */
+    private async downloadOnce(
+        workerIndex: number,
+        accountEmail: string | undefined,
+        format: DownloadFormat,
+        onEditorReady?: () => void,
+    ): Promise<string> {
         // The share/publish panel left open by the previous step is a modal <dialog>, which
         // makes the rest of the page inert. The trigger is visible and enabled in the top
         // nav the whole time, but the click cannot land — the probe's first run burned a
         // 15s click timeout on exactly this. Clear the panel before reaching for the nav.
         await this.dismissOpenPanels();
 
-        await expect(this.downloadTrigger).toBeEnabled({ timeout: EDITOR_READY_TIMEOUT });
+        await expect(this.downloadTrigger).toBeEnabled({ timeout: EDITOR_BOOT_TIMEOUT });
+        onEditorReady?.();
         await this.downloadTrigger.click({ timeout: CLICK_TIMEOUT });
 
         await expect(this.downloadCommitBtn).toBeEnabled({ timeout: DOWNLOAD_PANEL_TIMEOUT });
+        if (format !== 'png') await this.chooseFileFormat(format);
 
         // Armed here, NOT before the trigger click: waitForEvent starts its clock
         // immediately, so arming earlier would let the two waits above (up to 180s
@@ -229,6 +376,14 @@ export class EditorDashboard {
 
         const download = await downloadPromise;
 
+        // The panel silently keeps PNG if the format pick did not take, so check the file
+        // that actually arrived rather than trusting the clicks.
+        const suggested = download.suggestedFilename();
+        const expectedExt = format === 'jpg' ? /\.jpe?g$/i : new RegExp(`\\.${format}$`, 'i');
+        if (!expectedExt.test(suggested)) {
+            throw new Error(`downloadDesign: asked for ${format.toUpperCase()} but the download is "${suggested}"`);
+        }
+
         fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
         // Worker-prefixed because suggestedFilename is minute-resolution
         // ("Untitled - August 18, 2026 at 20.51.17.png") and parallel workers collide.
@@ -237,11 +392,21 @@ export class EditorDashboard {
         const emailSlug = accountEmail
             ? accountEmail.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '_') + '-'
             : '';
-        const filePath = path.join(DOWNLOADS_DIR, `worker-${workerIndex}-${emailSlug}${download.suggestedFilename()}`);
+        const filePath = path.join(DOWNLOADS_DIR, `worker-${workerIndex}-${emailSlug}${suggested}`);
         await download.saveAs(filePath);
         console.log(`downloadDesign: saved ${filePath}`);
 
         return filePath;
+    }
+
+    /**
+     * Switch the open download panel from its default (PNG) to `format`: open the
+     * file-format picker, click the option, and wait for the commit button to settle again.
+     */
+    private async chooseFileFormat(format: DownloadFormat): Promise<void> {
+        await this.fileFormatPicker.click({ timeout: CLICK_TIMEOUT });
+        await this.page.locator(`[data-testid="download-${format}"]`).click({ timeout: CLICK_TIMEOUT });
+        await expect(this.downloadCommitBtn).toBeEnabled({ timeout: DOWNLOAD_PANEL_TIMEOUT });
     }
 
     /**

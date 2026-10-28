@@ -37,7 +37,11 @@ export function loadFreshAdobeAccounts(
     ? loadAccountsFromCsv(source.path)
     : [loadAccountFromEnv(env)];
   const accounts = dedupeAccounts(sourceAccounts, source.description);
-  const consumedEmails = loadConsumedEmailSet(options.consumedLedgerPath ?? getAdobeConsumedLedgerPath(cwd));
+  // ADOBE_IGNORE_CONSUMED=1 runs every account in the CSV, ledger or not — e.g. to
+  // re-run accounts an older run marked consumed without ever producing a download.
+  const consumedEmails = env.ADOBE_IGNORE_CONSUMED?.trim() === '1'
+    ? new Set<string>()
+    : loadConsumedEmailSet(options.consumedLedgerPath ?? getAdobeConsumedLedgerPath(cwd));
   const freshAccounts = accounts.filter((account) => !consumedEmails.has(account.email));
 
   return {
