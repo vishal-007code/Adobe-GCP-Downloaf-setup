@@ -357,7 +357,7 @@ export class EditorDashboard {
 
         await expect(this.downloadTrigger).toBeEnabled({ timeout: EDITOR_BOOT_TIMEOUT });
         onEditorReady?.();
-        await this.downloadTrigger.click({ timeout: CLICK_TIMEOUT });
+        await this.openDownloadPanel(accountEmail);
 
         await expect(this.downloadCommitBtn).toBeEnabled({ timeout: DOWNLOAD_PANEL_TIMEOUT });
         if (format !== 'png') await this.chooseFileFormat(format);
@@ -397,6 +397,33 @@ export class EditorDashboard {
         console.log(`downloadDesign: saved ${filePath}`);
 
         return filePath;
+    }
+
+    /**
+     * Click the Download trigger, falling back to a DOM click when the real click stalls.
+     *
+     * Under software GL on a busy CPU the trusted click can hang at "scrolling into view if
+     * needed" with the button visible, enabled and stable: the scroll waits on frames the
+     * starved renderer is not producing. The 2026-10-26 local job hit it on 2 of 3 attempts
+     * for one account, which then needed a full re-login. A dispatched click skips the
+     * scroll and hit-test, and costs seconds where the editor reload that would otherwise
+     * follow costs minutes. The caller's wait for the commit button still confirms that
+     * the panel really opened.
+     */
+    private async openDownloadPanel(accountEmail: string | undefined): Promise<void> {
+        try {
+            await this.downloadTrigger.click({ timeout: CLICK_TIMEOUT });
+        } catch (error) {
+            if (this.page.isClosed()) throw error;
+            // The real click may have landed just as it timed out; a second click would
+            // toggle the panel shut again.
+            if (await this.downloadCommitBtn.isVisible().catch(() => false)) return;
+            console.log(
+                `[ADOBE_CLICK_FALLBACK] email=${accountEmail ?? ''} target=download-trigger` +
+                ` after="${firstLine(error).replace(/"/g, "'").slice(0, 120)}"`,
+            );
+            await this.downloadTrigger.dispatchEvent('click', undefined, { timeout: CLICK_TIMEOUT });
+        }
     }
 
     /**
