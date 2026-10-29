@@ -6,11 +6,11 @@
 #   asia-south1 (Mumbai)  -> first  half of the accounts
 #   asia-south2 (Delhi)   -> second half of the accounts
 #
-# Each region runs the safe per-region config (PARALLELISM=8 x WORKERS=4 = ~32
-# accounts in flight, within the ~20 vCPU / 40 GiB regional quota). With the run
-# stopping right after Let's Go (ADOBE_STOP_AFTER_LETS_GO=1), each account takes
-# ~login time (~60-90s) instead of ~6 min, so ~29.6k accounts finish well inside
-# a ~15h window across two regions.
+# Each region runs the safe per-region config (PARALLELISM=9 tasks x 1 browser = ~9
+# accounts in flight, within the ~20 vCPU / 40 GiB regional quota). The default is
+# the full download flow (ADOBE_STOP_AFTER_LETS_GO=0); each finished download is
+# recorded in the logs (no PNGs kept) — report with `bash scripts/build-run-report.sh`.
+# Set ADOBE_STOP_AFTER_LETS_GO=1 for an activation-only run (~60-90s per account).
 #
 # PREREQS:
 #   1. tests/adobe/script.spec.ts honors ADOBE_STOP_AFTER_LETS_GO=1 (restored).
@@ -29,28 +29,36 @@ set -euo pipefail
 
 : "${IMAGE_URI:?IMAGE_URI is required. Run scripts/setup-run.sh first and copy the printed IMAGE_URI.}"
 
-PROJECT_ID="${PROJECT_ID:-project-8606ec18-5b16-4826-af3}"
+# Defaults to the active gcloud project (projects rotate per trial; never hardcode one).
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null | tr -d '\r')}"
+: "${PROJECT_ID:?set PROJECT_ID, or pick a project with: gcloud config set project <id>}"
 IMAGE_URI_S1="${IMAGE_URI_S1:-$IMAGE_URI}"
 IMAGE_URI_S2="${IMAGE_URI_S2:-$IMAGE_URI}"
 
 REGION_S1="${REGION_S1:-asia-south1}"
 REGION_S2="${REGION_S2:-asia-south2}"
 
-# Source CSVs (the full account list is split across these two files).
+# Source CSVs. CSV_B is optional — leave it unset to split just CSV_A across the two
+# regions (it used to default to accounts-11.csv and abort when that file was absent).
 CSV_A="${CSV_A:-accounts.csv}"
-CSV_B="${CSV_B:-accounts-11.csv}"
+CSV_B="${CSV_B:-}"
 
 # Per-region throughput knobs (exported through to run-batches.sh). Defaults are
 # the safe within-quota values. Bump PARALLELISM to 10 only if the region's
 # Cloud Run vCPU quota is confirmed at 20 (10 x CPU=2 = 20 vCPU, no headroom).
 export CPU="${CPU:-2}"
+# Download-flow defaults, same as run-batches.sh (see the reasoning there): ONE browser
+# per 2-vCPU task, because the software-GL editor starves with two. 9 x 2 vCPU / 4Gi =
+# 18 vCPU / 36 GiB per region, inside the ~20 vCPU / 40 GiB quota.
 export MEMORY="${MEMORY:-4Gi}"
-export PARALLELISM="${PARALLELISM:-8}"
-export ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-3}"
+export PARALLELISM="${PARALLELISM:-9}"
+export ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-1}"
 export ADOBE_STOP_AFTER_LETS_GO="${ADOBE_STOP_AFTER_LETS_GO:-0}"
 export TASK_TIMEOUT="${TASK_TIMEOUT:-8h}"
 
 STAMP="$(date +%Y%m%d%H%M%S)"
+# One Chat thread for the whole two-region run (each message names its region).
+export GOOGLE_CHAT_THREAD_KEY="${GOOGLE_CHAT_THREAD_KEY:-adobe-run-${STAMP}}"
 PREP_DIR="tmp/india-2region-${STAMP}"
 mkdir -p "$PREP_DIR"
 
@@ -65,14 +73,14 @@ log() { echo "[INDIA-2R][$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"; }
 # missing trailing newline) — same robust method as run-batches.sh.
 count_rows() { tail -n +2 "$1" | sed 's/\r$//' | grep -c '[^[:space:]]' || true; }
 
-for f in "$CSV_A" "$CSV_B"; do
+for f in "$CSV_A" ${CSV_B:+"$CSV_B"}; do
   [[ -f "$f" ]] || { echo "ERROR: input CSV not found: $f"; exit 1; }
 done
 
 # ── 1) Merge both files + dedupe by lowercased email (keep first occurrence) ───
 {
   echo "$HEADER"
-  { tail -n +2 "$CSV_A"; tail -n +2 "$CSV_B"; } \
+  { tail -n +2 "$CSV_A"; [[ -z "$CSV_B" ]] || tail -n +2 "$CSV_B"; } \
     | sed 's/\r$//' \
     | awk -F',' 'NF>=2 { key=tolower($1); gsub(/^[ \t]+|[ \t]+$/,"",key); if (key != "" && !seen[key]++) print }'
 } > "$MASTER"
@@ -91,7 +99,7 @@ S2_ROWS=$(count_rows "$HALF2")
 log "============================================================"
 log "India two-region login run"
 log "Project:        ${PROJECT_ID}"
-log "Merged unique:  ${DATA_ROWS} accounts (from ${CSV_A} + ${CSV_B})"
+log "Merged unique:  ${DATA_ROWS} accounts (from ${CSV_A}${CSV_B:+ + ${CSV_B}})"
 log "${REGION_S1}:   ${S1_ROWS} accounts   image=${IMAGE_URI_S1}"
 log "${REGION_S2}:   ${S2_ROWS} accounts   image=${IMAGE_URI_S2}"
 log "Per region:     PARALLELISM=${PARALLELISM} x WORKERS=${ADOBE_PLAYWRIGHT_WORKERS} = $(( PARALLELISM * ADOBE_PLAYWRIGHT_WORKERS )) in flight"

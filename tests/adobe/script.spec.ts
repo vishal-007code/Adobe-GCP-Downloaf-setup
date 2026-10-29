@@ -1,8 +1,17 @@
+import fs from 'node:fs';
 import { defineAdobeAccountTests, expect } from '../../src/adobe/spec';
+import { ADOBE_DOWNLOAD_ATTACHMENT, ADOBE_LOGIN_ATTACHMENT } from '../../src/adobe/runtime';
+import { getDownloadsUploadUri, uploadDownload } from '../../src/adobe/download-upload';
 import { AdobePage } from "../../src/pages/adobe";
 import { GmailProvider } from "../../src/pages/gmailProvider";
 import { MsProvider} from "../../src/pages/msProvider";
-import { EditorDashboard } from '../../src/pages/editorDashboard';
+import { DOWNLOAD_FORMATS, DownloadFormat, EditorDashboard } from '../../src/pages/editorDashboard';
+
+// Export format: png (default) | jpg | pdf. Set per run with ADOBE_DOWNLOAD_FORMAT.
+const DOWNLOAD_FORMAT = (process.env.ADOBE_DOWNLOAD_FORMAT?.trim().toLowerCase() || 'png') as DownloadFormat;
+if (!DOWNLOAD_FORMATS.includes(DOWNLOAD_FORMAT)) {
+  throw new Error(`ADOBE_DOWNLOAD_FORMAT must be one of ${DOWNLOAD_FORMATS.join(', ')} (got "${DOWNLOAD_FORMAT}")`);
+}
 
 const FIXED_POSTCARD_URL = 'https://new.express.adobe.com/design/template/urn:aaid:sc:VA6C2:f2c97bf0-1039-5b0d-be7a-528c0060757b?category=text&entryPoint=template&taskID=postcard';
 
@@ -18,6 +27,8 @@ function providerHost(providerUrl: string): string {
 }
 
 defineAdobeAccountTests('script flow', async ({ page, context, account, stepTracker }, testInfo) => {
+    // Stamped first so the download retry can tell how much of testInfo.timeout is left.
+    const testStartedAt = Date.now();
     const adobe = new AdobePage(page);
     let editor: EditorDashboard;   // bound to the postcard tab once it opens
     const ms = new MsProvider(page);
@@ -46,10 +57,25 @@ defineAdobeAccountTests('script flow', async ({ page, context, account, stepTrac
   }
 
   stepTracker.setStep('Wait for Adobe Dashboard');
-  await adobe.waitForDashboard();
+  // Passing the email emits the [ADOBE_LOGIN_OK] / [ADOBE_LOGIN_FAIL] log marker.
+  await adobe.waitForDashboard(account.email);
+  const loginMs = Date.now() - testStartedAt;
 
   stepTracker.setStep('Activate by Lets Go');
-  await adobe.skipLetsGoViaAPI(account.email);
+  try {
+    await adobe.skipLetsGoViaAPI(account.email);
+  } finally {
+    // Attach login proof (after Let's Go so ownerEntity has been captured, but in a
+    // finally so a Let's Go failure still records the login). The reporter reads it to
+    // fill logged_in/dashboard_url/owner_entity even if a later step fails.
+    const loginEvidence = adobe.getLoginEvidence();
+    if (loginEvidence) {
+      await testInfo.attach(ADOBE_LOGIN_ATTACHMENT, {
+        body: Buffer.from(JSON.stringify({ ...loginEvidence, loginMs }), 'utf8'),
+        contentType: 'application/json',
+      });
+    }
+  }
 
   // Activation-only mode: ADOBE_STOP_AFTER_LETS_GO=1 stops here — login is proven and
   // Let's Go dismissed, but the postcard tab + download are skipped. Leave the flag
@@ -63,6 +89,10 @@ defineAdobeAccountTests('script flow', async ({ page, context, account, stepTrac
   stepTracker.setStep('Navigate to Fixed Postcard');
   // Settle buffer to let late dashboard content/interrupts render.
   await page.waitForTimeout(1200);
+  // Editor-open time runs from here to the Download button being enabled (reloads included).
+  const editorStartedAt = Date.now();
+  let editorReadyAt = editorStartedAt;
+  let editorReloads = 0;
   const postcardPage = await context.newPage();
   await postcardPage.goto(FIXED_POSTCARD_URL, { waitUntil: 'load' });
   editor = new EditorDashboard(postcardPage);   // rebind; original tab stays open
@@ -112,8 +142,49 @@ defineAdobeAccountTests('script flow', async ({ page, context, account, stepTrac
   // Firefly-era 'Selected image' radio, which this editor's download panel does not have.
   // Both confirmed live by tests/adobe/experiment-v8.spec.ts.
   stepTracker.setStep('Download');
-  const filePath = await editor.downloadDesign(testInfo.workerIndex, account.email);
-  console.log(`File saved to: ${filePath}`);
+  let filePath: string;
+  try {
+    filePath = await editor.downloadDesign(testInfo.workerIndex, account.email, {
+      format: DOWNLOAD_FORMAT,
+      onStep: (step) => stepTracker.setStep(step),
+      budgetLeftMs: () => testInfo.timeout - (Date.now() - testStartedAt),
+      onEditorReady: (attempt) => {
+        editorReadyAt = Date.now();
+        editorReloads = attempt - 1;
+      },
+    });
+  } catch (error) {
+    // Playwright's own failure screenshot often times out on the heavy editor canvas (and
+    // is skipped for pages it cannot reach), so capture the editor tab explicitly.
+    const shot = await postcardPage.screenshot({ timeout: 15_000 }).catch(() => undefined);
+    if (shot) await testInfo.attach('editor-at-failure', { body: shot, contentType: 'image/png' });
+    throw error;
+  }
+  const downloadedAt = Date.now();
+  console.log(`File saved to: ${filePath} (${fs.statSync(filePath).size} bytes)`);
   expect(filePath).toBeTruthy();
+
+  // The PNG itself is not kept: on Cloud Run it vanishes with the container. The proof of
+  // the download is the attachment below, which the reporter turns into downloaded=yes in
+  // the results CSV and the [ADOBE_RESULT] log line (read back by build-run-report.sh).
+  // Setting ADOBE_DOWNLOADS_GCS_URI additionally copies each PNG to the bucket as
+  // <email>.png; an upload failure then fails the test so the account is retried.
+  let downloadFile = filePath;
+  const uploadPrefix = getDownloadsUploadUri();
+  if (uploadPrefix) {
+    stepTracker.setStep('Upload to GCS');
+    downloadFile = await uploadDownload(filePath, account.email, uploadPrefix);
+    console.log(`[ADOBE_DOWNLOAD] email=${account.email.trim().toLowerCase()} file=${downloadFile}`);
+  }
+  await testInfo.attach(ADOBE_DOWNLOAD_ATTACHMENT, {
+    body: Buffer.from(JSON.stringify({
+      file: downloadFile,
+      bytes: fs.statSync(filePath).size,
+      editorOpenMs: editorReadyAt - editorStartedAt,
+      exportMs: downloadedAt - editorReadyAt,
+      editorReloads,
+    }), 'utf8'),
+    contentType: 'application/json',
+  });
 
 });

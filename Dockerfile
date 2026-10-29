@@ -33,8 +33,9 @@ RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
 # The base image ships browsers built for ITS OWN Playwright version, which need not
 # match the version just locked. Install the chromium build belonging to the installed
 # version so the two can never disagree — this is what makes the mismatch impossible
-# rather than merely unlikely. playwright.cloud.config.ts uses the bundled chromium
-# (no `channel`), so chromium alone is enough.
+# rather than merely unlikely. playwright.cloud.config.ts uses channel:'chromium' (the
+# full build, not the headless shell); `install chromium` supplies it, so chromium alone
+# is enough.
 RUN npx playwright install chromium
 
 COPY . .

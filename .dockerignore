@@ -20,6 +20,10 @@ docs
 *.xlsx
 aug-week-csvs
 
+# Secrets — the Chat webhook reaches the tasks from Secret Manager, never inside the image
+.env
+.env.*
+
 # Editor / OS
 .idea
 .vscode

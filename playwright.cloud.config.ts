@@ -9,11 +9,17 @@ const adobeRunId = process.env.ADOBE_RUN_ID?.trim() || createAdobeRunId();
 process.env.ADOBE_RUN_ID = adobeRunId;
 
 // Worker count comes from ADOBE_PLAYWRIGHT_WORKERS (set by run-batches.sh / the job
-// env), falling back to legacy WORKERS, then 3.
+// env), falling back to legacy WORKERS, then 1: the software-GL editor needs a whole
+// 2-vCPU task per browser (see run-batches.sh).
 const WORKERS = parseInt(
-  process.env.ADOBE_PLAYWRIGHT_WORKERS ?? process.env.WORKERS ?? '3',
+  process.env.ADOBE_PLAYWRIGHT_WORKERS ?? process.env.WORKERS ?? '1',
   10,
 );
+
+// Test-level retries: a failed account is re-run once with a fresh browser context (new
+// login) before it is reported failed, so flaky logins/editor loads still end with a
+// download. Override with ADOBE_TEST_RETRIES (0 disables).
+const RETRIES = parseInt(process.env.ADOBE_TEST_RETRIES ?? '1', 10);
 
 export default defineConfig({
   testDir: './tests',
@@ -64,6 +70,11 @@ export default defineConfig({
         '--use-gl=angle',
         '--use-angle=swiftshader',
         '--enable-unsafe-swiftshader',
+        // Hides navigator.webdriver. Without it Google's federated sign-in rejects headless
+        // logins at the EMAIL step with "Couldn't sign you in — This browser or app may not
+        // be secure" (the 2026-09-29 local run failed 64/64 on it). Same flag as
+        // STEALTH_ARGS in playwright.config.ts.
+        '--disable-blink-features=AutomationControlled',
       ],
     },
   },
@@ -75,7 +86,7 @@ export default defineConfig({
       // that still runs the old GPU-dependent Share→Publish leg and heavy html/aria
       // dumps, polluting cloud runs. Match script.spec.ts exactly.
       testMatch: /tests[\\/]adobe[\\/]script\.spec\.ts$/,
-      retries: 0,
+      retries: RETRIES,
       use: { ...devices['Desktop Chrome'] },
     },
   ],

@@ -1,6 +1,21 @@
 import fs from 'node:fs';
 import {expect, Locator, Page} from "@playwright/test";
 
+/** One-line, token-free error text for log markers ([ADOBE_LOGIN_FAIL]) and CSV cells:
+ *  drops Playwright's "===== logs =====" tail, ANSI colour codes and URL query strings
+ *  (OAuth/SAML tokens), and double quotes so the marker stays parseable. */
+export function cleanReason(error: unknown): string {
+    return String(error)
+        .split(/={5,}/)[0]
+        .replace(/\x1b\[[0-9;]*m/g, '')
+        .replace(/\[[0-9;]*m/g, '')
+        .replace(/https?:\/\/\S+/g, (url) => url.split('?')[0])
+        .replace(/\s+/g, ' ')
+        .replace(/"/g, "'")
+        .trim()
+        .slice(0, 200);
+}
+
 export class AdobePage {
 
     readonly page: Page;
@@ -28,6 +43,8 @@ export class AdobePage {
     private capturedOwnerEntity = '';
     private udsCapturing = false;
     private dashboardHandlersInstalled = false;
+    // Set the moment the dashboard is confirmed; read back via getLoginEvidence().
+    private loginEvidence: { ok: boolean; url: string; at: string } | undefined;
 
 
     private randomSearchKeywords : string[];
@@ -134,13 +151,41 @@ export class AdobePage {
         return await handle.jsonValue() as string;
     }
 
-    async waitForDashboard(): Promise<void> {
+    /**
+     * Pass loginAccount to emit a greppable per-account login marker on stdout:
+     *   [ADOBE_LOGIN_OK]   email=... url=... elapsed_ms=... at=...
+     *   [ADOBE_LOGIN_FAIL] email=... elapsed_ms=... reason="..."
+     * scripts/count-logins.sh (MODE=accounts / MODE=failures) reads these from the Cloud
+     * Run logs. They fire the moment the dashboard is confirmed, so a later failure
+     * (Let's Go, postcard, download) cannot erase the evidence that login succeeded.
+     */
+    async waitForDashboard(loginAccount?: string): Promise<void> {
+        const startedAt = Date.now();
+        // Adobe now lands the post-login dashboard on express.adobe.com (it used to be
+        // new.express.adobe.com), so accept either host. Skip the intermediate
+        // ?postlogin=true redirect hops on the way there — the dashboard isn't up yet.
         try {
-            await this.page.waitForURL(/new.express.adobe.com/, { timeout: 120_000 });
-            await expect(this.page).toHaveURL(/.*new\.express\.adobe\.com/);
+            await this.page.waitForURL(
+                url => /^(new\.)?express\.adobe\.com$/.test(url.hostname) && !url.searchParams.has('postlogin'),
+                { timeout: 120_000 }
+            );
         } catch (e) {
-            throw new Error(`Failed to navigate to Adobe Dashboard (new.express.adobe.com). Login likely failed. Original error: ${e}`);
+            if (loginAccount) {
+                console.log(`[ADOBE_LOGIN_FAIL] email=${loginAccount} elapsed_ms=${Date.now() - startedAt} reason="${cleanReason(e)}"`);
+            }
+            throw new Error(`Failed to navigate to Adobe Dashboard (express.adobe.com). Login likely failed. Original error: ${e}`);
         }
+
+        // Path only — the dashboard URL can carry query tokens.
+        const dashboardUrl = this.page.url().split('?')[0];
+        const at = new Date().toISOString();
+        if (loginAccount) {
+            console.log(
+                `[ADOBE_LOGIN_OK] email=${loginAccount} url=${dashboardUrl}` +
+                ` elapsed_ms=${Date.now() - startedAt} at=${at}`,
+            );
+        }
+        this.loginEvidence = { ok: true, url: dashboardUrl, at };
 
         await this.installDashboardInterruptionHandlers();
 
@@ -262,6 +307,17 @@ export class AdobePage {
     }
 
     /**
+     * Login proof for the current account, attached to the test result so the reporter's
+     * logged_in / dashboard_url / owner_entity CSV columns are filled even when a later
+     * step fails. ownerEntity is Adobe's server-side user ID from authenticated UDS
+     * traffic; the captured bearer token is a live credential and is never exposed.
+     */
+    getLoginEvidence(): { ok: boolean; url: string; at: string; ownerEntity: string } | undefined {
+        if (!this.loginEvidence) return undefined;
+        return { ...this.loginEvidence, ownerEntity: this.capturedOwnerEntity };
+    }
+
+    /**
      * Start passively intercepting UDS requests to capture auth header and ownerEntity.
      * Call this BEFORE dashboard loads (e.g., right after creating AdobePage).
      */
@@ -325,8 +381,9 @@ export class AdobePage {
         // If we have both pieces, fire the API
         if (this.capturedAuthHeader && this.capturedOwnerEntity) {
             try {
+                // Same host the dashboard is on (express.adobe.com or new.express.adobe.com).
                 const response = await this.page.request.patch(
-                    'https://new.express.adobe.com/service/uds/userdocs/uds-projectx',
+                    new URL('/service/uds/userdocs/uds-projectx', this.page.url()).href,
                     {
                         headers: {
                             'authorization': this.capturedAuthHeader,

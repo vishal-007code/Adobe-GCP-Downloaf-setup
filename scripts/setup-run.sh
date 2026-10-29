@@ -9,7 +9,9 @@
 # After success it prints the IMAGE_URI to use with run-batches.sh.
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-project-8606ec18-5b16-4826-af3}"
+# Defaults to the active gcloud project (projects rotate per trial; never hardcode one).
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null | tr -d '\r')}"
+: "${PROJECT_ID:?set PROJECT_ID, or pick a project with: gcloud config set project <id>}"
 REGION="${REGION:-asia-south1}"
 REPOSITORY="${REPOSITORY:-playwright-jobs}"
 IMAGE_NAME="${IMAGE_NAME:-adobe-login-flow}"
@@ -39,7 +41,9 @@ gcloud services enable \
   storage.googleapis.com \
   run.googleapis.com \
   iam.googleapis.com \
+  secretmanager.googleapis.com \
   --project="${PROJECT_ID}"
+# secretmanager: run-batches.sh stores the Chat webhook there and the tasks read it.
 
 PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
 
@@ -105,10 +109,19 @@ retry_iam gcloud storage buckets add-iam-policy-binding "gs://${ACCOUNTS_BUCKET}
   --role="roles/storage.objectViewer" \
   --project="${PROJECT_ID}"
 
-log "Granting SA bucket write access (reports)..."
+log "Granting SA bucket write access (reports, and PNGs when DOWNLOADS_GCS_URI is set)..."
 retry_iam gcloud storage buckets add-iam-policy-binding "gs://${REPORTS_BUCKET}" \
   --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
   --role="roles/storage.objectCreator" \
+  --project="${PROJECT_ID}"
+
+# The PNG upload uses `gcloud storage cp --no-clobber`, which reads the destination to
+# skip an account whose PNG already exists. Same bucket as above by default (then this
+# is a no-op); needed when REPORTS_BUCKET is a separate bucket.
+log "Granting SA read access on the reports bucket (no-clobber check)..."
+retry_iam gcloud storage buckets add-iam-policy-binding "gs://${REPORTS_BUCKET}" \
+  --member="serviceAccount:${RUNTIME_SERVICE_ACCOUNT}" \
+  --role="roles/storage.objectViewer" \
   --project="${PROJECT_ID}"
 
 log "Granting SA logging permission..."
