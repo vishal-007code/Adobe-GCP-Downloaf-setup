@@ -14,10 +14,18 @@ PNG export). The measured results in §9 and the retry recipe in §10 come from 
 
 A Playwright/TypeScript suite logs into Adobe with school-issued accounts
 (Bihar ICT + Kendriya Vidyalaya), reaches the dashboard, dismisses "Let's Go",
-opens a fixed postcard template in the editor and exports it as a PNG. The
+opens its region's postcard template in the editor and exports it as a PNG. The
 result per account is **Login + Download**, **Login only** or **Login failed**.
 The PNG itself is not kept; the record that the export finished is the proof
 (see `docs/run-report.md`).
+
+KVS and Bihar accounts download **different** postcards (`src/adobe/regions.ts`).
+The region comes from the email domain: any domain containing `kvs` is KVS
+(`cha.kvs.ac.in`, `kvsromumbai.in`, `rokvsagra.in`), any `*edu.in` domain is Bihar
+(`ar.purniaedu.in`, `pa.patnaedu.in`). An accounts CSV may add a `Region` column
+(`kvs` / `bihar`) to override it per row. A CSV with an account that fits neither
+rule and has no `Region` value stops the run before any account starts, rather than
+download the wrong template.
 
 - Entry point: `tests/adobe/script.spec.ts`
 - Page logic: `src/pages/adobe.ts`, `src/pages/editorDashboard.ts`, `src/pages/msProvider.ts`
@@ -39,8 +47,8 @@ account, no editor), which can use 3–4 browsers per task.
 [ADOBE_LOGIN_FAIL]     email=... elapsed_ms=... reason="..."
 [ADOBE_LETSGO_OK]      email=... via=api|ui owner_entity=... status=...
 [ADOBE_RESULT]         status=passed|failed email=... logged_in=yes|no downloaded=yes|no
-                       outcome=login_download|login_only|no_login [login_s= editor_open_s=
-                       export_s= editor_reloads=] [step=... reason=...]
+                       outcome=login_download|login_only|no_login region=kvs|bihar
+                       [login_s= editor_open_s= export_s= editor_reloads=] [step=... reason=...]
 [ADOBE_TASK_SUMMARY]   task=N of=M attempted=N login_ok=N login_fail=N passed=N failed=N skipped=N downloaded=N
 [ADOBE_RETRY]          email=... attempt=1/2 step=... reason=...   (a test retry follows; not a final result)
 [ADOBE_DOWNLOAD_RETRY] / [ADOBE_DOWNLOAD_RECOVERED] / [ADOBE_DOWNLOAD_DIAG]   editor reloads
@@ -205,7 +213,8 @@ Source workbooks arrive as xlsx, e.g.
 `Server_KV_Activation_8-14_Aug_26.xlsx` (sheet `KV Server`), with columns
 `S# | Name | Email Address | Password | Dist|Region`.
 
-The runner needs exactly `Email,Password`. Convert with a throwaway dep so
+The runner needs `Email,Password` (plus an optional `Region` column of `kvs`/`bihar`
+— not the workbook's `Dist|Region`, which is a place name). Convert with a throwaway dep so
 `package.json` stays clean:
 
 ```bash

@@ -9,10 +9,15 @@ The test attaches proof as it goes (`tests/adobe/script.spec.ts`), and the repor
 (`src/adobe/reporter.ts`) turns it into one line per account in the Cloud Run logs:
 
 ```
-[ADOBE_RESULT] status=passed email=a@x.in logged_in=yes downloaded=yes outcome=login_download login_s=31.0 editor_open_s=24.6 export_s=11.2 editor_reloads=0
-[ADOBE_RESULT] status=failed email=b@x.in logged_in=yes downloaded=no outcome=login_only login_s=33.4 step="Download (after reload 2)" reason="..."
-[ADOBE_RESULT] status=failed email=c@x.in logged_in=no downloaded=no outcome=no_login step="Login with accounts.google.com" reason="..."
+[ADOBE_RESULT] status=passed email=a@x.in logged_in=yes downloaded=yes outcome=login_download region=kvs login_s=31.0 editor_open_s=24.6 export_s=11.2 editor_reloads=0
+[ADOBE_RESULT] status=failed email=b@x.in logged_in=yes downloaded=no outcome=login_only region=bihar login_s=33.4 step="Download (after reload 2)" reason="..."
+[ADOBE_RESULT] status=failed email=c@x.in logged_in=no downloaded=no outcome=no_login region=kvs step="Login with accounts.google.com" reason="..."
 ```
+
+- `region=kvs|bihar` is which postcard template the account was given (see
+  `src/adobe/regions.ts`): KVS accounts get the KVS postcard, Bihar accounts the Bihar
+  one. It comes from the email domain, or from an optional `Region` column in the
+  accounts CSV.
 
 - `downloaded=yes` means the PNG export finished. It is set from the download attachment,
   which is the test's last step, not from `status`. An activation-only run
@@ -24,7 +29,7 @@ The test attaches proof as it goes (`tests/adobe/script.spec.ts`), and the repor
   - `export_s`: from the Download button to the PNG being saved.
   - `editor_reloads`: how many editor reloads were needed.
 - The same fields are in the local results CSV (`reports/adobe_results_<run>.csv`, columns
-  `downloaded`, `outcome`, `login_s`, `editor_open_s`, `export_s`, `editor_reloads`).
+  `downloaded`, `outcome`, `login_s`, `editor_open_s`, `export_s`, `editor_reloads`, `region`).
 - Each task's `[ADOBE_TASK_SUMMARY]` line now also carries `downloaded=N`, so
   `bash scripts/count-logins.sh` prints logged in, + downloaded, and login only totals.
 

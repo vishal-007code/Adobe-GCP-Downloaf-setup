@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseCsv } from './csv';
+import { ADOBE_REGIONS, emailDomain, parseRegion, regionFromEmail } from './regions';
+import type { AdobeRegion } from './regions';
 import {
   ADOBE_CONSUMED_HEADERS,
   ADOBE_NO_FRESH_ACCOUNTS_REASON,
@@ -143,6 +145,7 @@ function loadAccountsFromCsv(filePath: string): AdobeAccount[] {
   validateRequiredHeaders(headerMap, SOURCE_HEADERS, filePath);
 
   const accounts: AdobeAccount[] = [];
+  const unknownDomains = new Set<string>();
   for (let rowIndex = 1; rowIndex < rows.length; rowIndex += 1) {
     const row = rows[rowIndex];
     const rawEmail = readField(row, headerMap, 'email');
@@ -162,7 +165,24 @@ function loadAccountsFromCsv(filePath: string): AdobeAccount[] {
       throw new AdobeConfigurationError(`Account CSV "${filePath}" has a blank password on row ${rowIndex + 1}.`);
     }
 
-    accounts.push({ email, password });
+    // Optional Region column; blank falls back to the email domain.
+    const rawRegion = readField(row, headerMap, 'region');
+    const region = resolveRegion(email, rawRegion, `Account CSV "${filePath}" row ${rowIndex + 1}`);
+    if (!region) {
+      unknownDomains.add(emailDomain(email));
+      continue;
+    }
+
+    accounts.push({ email, password, region });
+  }
+
+  // Stop the whole run rather than download the wrong template: the client needs the
+  // KVS postcard on KVS accounts and the Bihar postcard on Bihar accounts.
+  if (unknownDomains.size > 0) {
+    throw new AdobeConfigurationError(
+      `Account CSV "${filePath}" has accounts on domain(s) that are neither KVS nor Bihar: ` +
+      `${[...unknownDomains].join(', ')}. Add a Region column (${ADOBE_REGIONS.join(' or ')}) for those rows.`,
+    );
   }
 
   if (accounts.length === 0) {
@@ -182,7 +202,29 @@ function loadAccountFromEnv(env: NodeJS.ProcessEnv): AdobeAccount {
     );
   }
 
-  return { email, password };
+  const region = regionFromEmail(email);
+  if (!region) {
+    throw new AdobeConfigurationError(
+      `ADOBE_EMAIL is on "${emailDomain(email)}", which is neither KVS nor Bihar. ` +
+      `Use an accounts CSV with a Region column (${ADOBE_REGIONS.join(' or ')}) instead.`,
+    );
+  }
+
+  return { email, password, region };
+}
+
+/** The row's Region value when set (it must be a known region), else the email domain's. */
+function resolveRegion(email: string, rawRegion: string, where: string): AdobeRegion | undefined {
+  if (!rawRegion.trim()) {
+    return regionFromEmail(email);
+  }
+  const region = parseRegion(rawRegion);
+  if (!region) {
+    throw new AdobeConfigurationError(
+      `${where} has Region "${rawRegion.trim()}"; it must be ${ADOBE_REGIONS.join(' or ')}.`,
+    );
+  }
+  return region;
 }
 
 function dedupeAccounts(accounts: AdobeAccount[], sourceDescription: string): AdobeAccount[] {

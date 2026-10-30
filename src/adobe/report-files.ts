@@ -46,6 +46,7 @@ function toResultValues(row: AdobeResultRow): string[] {
     row.editor_open_s ?? '',
     row.export_s ?? '',
     row.editor_reloads ?? '',
+    row.region ?? '',
   ];
 }
 

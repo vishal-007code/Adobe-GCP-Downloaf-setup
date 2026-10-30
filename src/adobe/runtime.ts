@@ -35,6 +35,8 @@ export const ADOBE_RESULTS_HEADERS = [
   'editor_open_s',
   'export_s',
   'editor_reloads',
+  // kvs | bihar — which postcard template the account was given (src/adobe/regions.ts).
+  'region',
 ] as const;
 
 export const ADOBE_CONSUMED_HEADERS = ['email', 'consumed_at'] as const;

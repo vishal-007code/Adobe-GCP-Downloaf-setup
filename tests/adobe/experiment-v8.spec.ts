@@ -420,7 +420,8 @@ test('experiment v8 — probe the Download step (which tab? what dialog?)', asyn
 // ════════════════════════════════════════════════════════════════
 
 type AccountPick = {
-  account?: AdobeAccount;
+  // The probe opens its own fixed postcard, so it needs no region.
+  account?: Pick<AdobeAccount, 'email' | 'password'>;
   failedSteps: string[];
   skipReason?: string;
 };
