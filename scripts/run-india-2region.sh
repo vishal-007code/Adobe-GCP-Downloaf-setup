@@ -9,7 +9,8 @@
 # Each region runs the safe per-region config (PARALLELISM=5 tasks x 1 browser x 8Gi = ~5
 # accounts in flight, within a ~20 vCPU / 40 GiB regional quota). The default is
 # the full download flow (ADOBE_STOP_AFTER_LETS_GO=0); each finished download is
-# recorded in the logs (no PNGs kept) — report with `bash scripts/build-run-report.sh`.
+# recorded in the logs and its PNG kept as gs://<bucket>/downloads/<email>.png — report
+# with `bash scripts/build-run-report.sh`.
 # Set ADOBE_STOP_AFTER_LETS_GO=1 for an activation-only run (~60-90s per account).
 #
 # PREREQS:

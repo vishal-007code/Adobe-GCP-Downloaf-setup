@@ -74,11 +74,12 @@ ADOBE_STRICT_LETS_GO="${ADOBE_STRICT_LETS_GO:-1}"
 ADOBE_VIDEO_MODE="${ADOBE_VIDEO_MODE:-off}"
 ADOBE_DEBUG_ARTIFACTS="${ADOBE_DEBUG_ARTIFACTS:-0}"
 SAVE_ARTIFACTS="${SAVE_ARTIFACTS:-false}"
-# PNGs are not kept by default (off): each download is recorded as downloaded=yes in the
-# account's [ADOBE_RESULT] log line, and `bash scripts/build-run-report.sh` turns those
-# into the per-account report. Set DOWNLOADS_GCS_URI=gs://${REPORTS_BUCKET}/downloads to
-# also upload every PNG as <email>.png.
-DOWNLOADS_GCS_URI="${DOWNLOADS_GCS_URI:-off}"
+# Every PNG is kept: each test uploads it right after the download as
+# gs://${REPORTS_BUCKET}/downloads/<email>.png (src/adobe/download-upload.ts; a re-run never
+# overwrites an existing PNG). The download is also recorded as downloaded=yes in the
+# account's [ADOBE_RESULT] log line, which `bash scripts/build-run-report.sh` reads.
+# DOWNLOADS_GCS_URI=off skips the upload and keeps only that record.
+DOWNLOADS_GCS_URI="${DOWNLOADS_GCS_URI:-gs://${REPORTS_BUCKET}/downloads}"
 # Re-run a failed account once (fresh login) inside the same task before giving up on it.
 ADOBE_TEST_RETRIES="${ADOBE_TEST_RETRIES:-1}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-8h}"
@@ -213,7 +214,7 @@ log "Parallelism:   ${PARALLELISM} (tasks running at once per job)"
 log "Workers:       ${ADOBE_PLAYWRIGHT_WORKERS}"
 log "Acct limit:    ${ADOBE_SCRIPT_ACCOUNT_LIMIT}"
 log "Stop after login: ${ADOBE_STOP_AFTER_LOGIN}"
-log "PNG uploads:   ${DOWNLOADS_GCS_URI} (off = downloads recorded in the logs only)"
+log "PNG uploads:   ${DOWNLOADS_GCS_URI}/<email>.png (DOWNLOADS_GCS_URI=off = logs only)"
 log "Test retries:  ${ADOBE_TEST_RETRIES}"
 log "Save reports:  ${SAVE_ARTIFACTS} (CSV/HTML reports only; false = logs only)"
 log "Chat in tasks: ${CHAT_IN_TASKS}"

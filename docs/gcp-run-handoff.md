@@ -16,7 +16,7 @@ A Playwright/TypeScript suite logs into Adobe with school-issued accounts
 (Bihar ICT + Kendriya Vidyalaya), reaches the dashboard, dismisses "Let's Go",
 opens its region's postcard template in the editor and exports it as a PNG. The
 result per account is **Login + Download**, **Login only** or **Login failed**.
-The PNG itself is not kept; the record that the export finished is the proof
+Each PNG is kept in the bucket as `downloads/<email>.png`. The record that the export finished is the proof
 (see `docs/run-report.md`).
 
 KVS and Bihar accounts download **different** postcards (`src/adobe/regions.ts`).
