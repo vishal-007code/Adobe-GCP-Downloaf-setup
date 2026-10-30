@@ -101,8 +101,8 @@ fact drives the whole configuration:
 | Knob | Value | Why |
 |---|---|---|
 | `CPU` | 2 | per task |
-| `MEMORY` | 4Gi | per task; ample for one browser |
-| `PARALLELISM` | 9 | 9 x 2 = 18 vCPU, 9 x 4Gi = 36 GiB — fits 20/40 |
+| `MEMORY` | 8Gi | per task; one browser with the postcard open peaks at ~4.8 GB, and 4Gi crashed the editor tab on every account |
+| `PARALLELISM` | 5 | 5 x 2 = 10 vCPU, 5 x 8Gi = 40 GiB — fits 20/40 |
 | `ADOBE_PLAYWRIGHT_WORKERS` | 1 | the software-GL editor needs the whole 2 vCPU; 2 browsers starve it |
 | `ADOBE_SCRIPT_ACCOUNT_LIMIT` | 21 | accounts per task, so tasks = ceil(rows / 21) |
 | `TASK_TIMEOUT` | 8h | 21 accounts x ~4 min ≈ 1.5h, more with retries; 8h is slack |
@@ -117,11 +117,19 @@ Consequences:
 - **Two jobs in one region do not go faster than one.** They split the same
   20 vCPU. To actually double throughput you must use a *second region*, and only
   the two India regions work (other regions get a captcha on the Google login).
-- Peak concurrency per region is `PARALLELISM x WORKERS` = ~9 accounts in flight.
+- Peak concurrency per region is `PARALLELISM x WORKERS` = ~5 accounts in flight.
 - A deploy that exceeds the quota fails at deploy time, or the execution sits at
   `runningCount: 0` forever.
-- Watch the first run for `page.goto: Page crashed` (out of memory). If it shows
-  up, use `MEMORY=6Gi PARALLELISM=6`.
+- **Memory is the binding limit now.** The first GCP run (2026-10-30) used 4Gi and
+  every account failed with `page.waitForEvent: Page crashed` about 50s after the
+  postcard opened. The editor reloads then fail instantly on the dead tab. A sampler on
+  an 8Gi task measured a ~4.8 GB peak while a postcard was open: the renderer ~1.8 GB,
+  the SwiftShader gpu-process ~1.3 GB, the dashboard tab ~0.55 GB and ~0.45 GB of
+  `/tmp`, which is in memory on Cloud Run. At 8Gi both postcards downloaded. 6Gi might
+  work but is untested.
+- The quota differs per project: `project-35fb1b7b-027e-4449-b09` reports 128 vCPU and
+  256 GiB per region (Service Usage API, `run.googleapis.com/mem_allocation`). Where the
+  quota is that high, raise `PARALLELISM`.
 
 **Other free-tier items to watch:**
 
@@ -354,7 +362,22 @@ several batches and regions into one total.
 | Export (Download → PNG saved) | ~60–185s |
 | Planning figure | ~230s per account per task; 9 tasks per region |
 
-Not yet measured on real Cloud Run CPUs: the first GCP run is the test.
+### Download flow, first GCP run (2026-10-30, `project-35fb1b7b-027e-4449-b09`)
+
+27 accounts (14 Bihar `kh.mungeredu.in`, 13 KVS `kvsrogurugram.in`) across both regions,
+2 tasks per region, 1 browser, 2 vCPU:
+
+| What | Result |
+|---|---|
+| At 4Gi | every account failed: `Page crashed` ~50s after the postcard opened (cancelled) |
+| At 8Gi | **27/27 Login + Download**, every account on its own region's postcard, 0 editor reloads |
+| Login | avg 35s, p90 51s |
+| Editor open | avg 44s, p90 55s |
+| Export | avg 48s, p90 62s |
+| Per account | ~2.5 min per task, with 6–7 accounts per task taking 14–17 min |
+
+That is faster than the laptop's emulation of the cloud setup (2 pinned cores), so ~150s per
+account per task is the better planning figure.
 
 ### Activation only, 8–14 Aug cycle
 
@@ -484,9 +507,10 @@ small enough to ignore.
 1. **Report with `build-run-report.sh`.** It builds the per-account report and
    the re-run list straight from the logs (`docs/run-report.md`).
    `SAVE_ARTIFACTS=true` is still an option if log pulls get too slow.
-2. **Plan at ~230s per account per task** for the download flow (9 tasks per
-   region ≈ 140 accounts/hr/region), and split by count across both regions from
-   the start. Re-measure from the first GCP run's timings.
+2. **Plan at ~150s per account per task** for the download flow, measured in the
+   first GCP run (§9). At 5 tasks x 8Gi per region that is ~120 accounts/hr/region.
+   Raise `PARALLELISM` where the project's memory quota allows. Split by count across
+   both regions from the start.
 3. **Investigate the 54–64% cloud login rate vs 84–86% local** (August data, at 4
    browsers per 2 vCPU). Sample `[ADOBE_LOGIN_FAIL]` and `[ADOBE_RESULT]
    status=failed` reasons from the first run: timeouts point to CPU (fixable by

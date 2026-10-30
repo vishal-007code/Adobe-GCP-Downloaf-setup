@@ -22,6 +22,12 @@ fi
 
 : "${IMAGE_URI:?IMAGE_URI is required. Run scripts/setup-run.sh first and copy the printed IMAGE_URI.}"
 
+# Launching from Git Bash on Windows: MSYS path conversion rewrites the --set-env-vars
+# argument (gs://bucket/... -> gs;\bucket\..., /tmp/... -> C:\...\Temp\...), so every
+# task would get a broken accounts URI. Exclude just that argument; gcloud's own wrapper
+# still needs conversion, so MSYS_NO_PATHCONV=1 would break gcloud itself. No-op on Linux.
+export MSYS2_ARG_CONV_EXCL="${MSYS2_ARG_CONV_EXCL:+${MSYS2_ARG_CONV_EXCL};}--set-env-vars="
+
 # Defaults to the active gcloud project (projects rotate per trial; never hardcode one).
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null | tr -d '\r')}"
 : "${PROJECT_ID:?set PROJECT_ID, or pick a project with: gcloud config set project <id>}"
@@ -41,19 +47,23 @@ TOTAL_ACCOUNTS="${TOTAL_ACCOUNTS:-}"
 BATCH_SIZE="${BATCH_SIZE:-}"
 
 CPU="${CPU:-2}"
-MEMORY="${MEMORY:-4Gi}"
+# 8Gi for ONE browser. The KVS/Bihar postcards are ~5000x3500 px; while one is open the
+# task peaks at ~4.8 GB (renderer ~1.8 GB + SwiftShader gpu-process ~1.3 GB + the dashboard
+# tab + in-memory /tmp). At 4Gi the editor tab died with "Page crashed" on every account
+# (first GCP run, 2026-10-30); at 8Gi the same accounts downloaded.
+MEMORY="${MEMORY:-8Gi}"
 # Concurrent tasks per job. A job's deploy must satisfy PARALLELISM x {CPU, MEMORY}
-# within the regional quota: 20 vCPU and 40 GiB total per India region.
-#   PARALLELISM=9 x CPU=2      = 18 vCPU  (<= 20)
-#   PARALLELISM=9 x MEMORY=4Gi = 36 GiB   (<= 40)
+# within the regional quota. Older trial projects had 20 vCPU / 40 GiB per India region:
+#   PARALLELISM=5 x CPU=2      = 10 vCPU  (<= 20)
+#   PARALLELISM=5 x MEMORY=8Gi = 40 GiB   (<= 40)
+# project-35fb1b7b-... reports 128 vCPU / 256 GiB per region; check the project's
+# "Total memory allocation" quota and raise PARALLELISM to match.
 # Throughput ~= PARALLELISM accounts in flight (one browser per task, see below).
-# Going faster needs a Cloud Run CPU/Memory quota increase for the region.
-PARALLELISM="${PARALLELISM:-9}"
+PARALLELISM="${PARALLELISM:-5}"
 # Browsers per task. Keep 1 for the download flow: the editor renders with software GL
 # (SwiftShader), and two browsers on 2 vCPU starve it ("Authoring engine did not
 # start", the Download button never mounts, clicks stall; 2026-10-16 diag). The
-# 2026-10-26 local pre-flight with 1 browser went 19/19. 4Gi is ample for one browser
-# (the old "Page crashed" OOM was 4Gi shared by 3). Activation-only runs
+# 2026-10-26 local pre-flight with 1 browser went 19/19. Activation-only runs
 # (ADOBE_STOP_AFTER_LETS_GO=1) never open the editor and can use 3-4.
 ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-1}"
 ADOBE_SCRIPT_ACCOUNT_LIMIT="${ADOBE_SCRIPT_ACCOUNT_LIMIT:-21}"
@@ -210,9 +220,9 @@ log "Chat in tasks: ${CHAT_IN_TASKS}"
 log "============================================================"
 
 # Rough duration: waves of PARALLELISM tasks, each task ADOBE_SCRIPT_ACCOUNT_LIMIT accounts
-# shared by its workers, at SECONDS_PER_ACCOUNT (~230s measured for the download flow on
-# 2 vCPU per browser; login-only is ~90s).
-SECONDS_PER_ACCOUNT="${SECONDS_PER_ACCOUNT:-$([[ "$ADOBE_STOP_AFTER_LETS_GO" == "1" ]] && echo 90 || echo 230)}"
+# shared by its workers, at SECONDS_PER_ACCOUNT (~150s measured for the download flow on
+# Cloud Run, 2 vCPU / 8Gi per browser, 2026-10-30; login-only is ~90s).
+SECONDS_PER_ACCOUNT="${SECONDS_PER_ACCOUNT:-$([[ "$ADOBE_STOP_AFTER_LETS_GO" == "1" ]] && echo 90 || echo 150)}"
 total_tasks=$(( (TOTAL_ACCOUNTS + ADOBE_SCRIPT_ACCOUNT_LIMIT - 1) / ADOBE_SCRIPT_ACCOUNT_LIMIT ))
 est_min=$(( ( (total_tasks + PARALLELISM - 1) / PARALLELISM ) * ( (ADOBE_SCRIPT_ACCOUNT_LIMIT + ADOBE_PLAYWRIGHT_WORKERS - 1) / ADOBE_PLAYWRIGHT_WORKERS ) * SECONDS_PER_ACCOUNT / 60 ))
 notify "🚀 *Adobe run triggered* — ${REGION}

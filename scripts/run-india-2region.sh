@@ -6,8 +6,8 @@
 #   asia-south1 (Mumbai)  -> first  half of the accounts
 #   asia-south2 (Delhi)   -> second half of the accounts
 #
-# Each region runs the safe per-region config (PARALLELISM=9 tasks x 1 browser = ~9
-# accounts in flight, within the ~20 vCPU / 40 GiB regional quota). The default is
+# Each region runs the safe per-region config (PARALLELISM=5 tasks x 1 browser x 8Gi = ~5
+# accounts in flight, within a ~20 vCPU / 40 GiB regional quota). The default is
 # the full download flow (ADOBE_STOP_AFTER_LETS_GO=0); each finished download is
 # recorded in the logs (no PNGs kept) — report with `bash scripts/build-run-report.sh`.
 # Set ADOBE_STOP_AFTER_LETS_GO=1 for an activation-only run (~60-90s per account).
@@ -48,10 +48,11 @@ CSV_B="${CSV_B:-}"
 # Cloud Run vCPU quota is confirmed at 20 (10 x CPU=2 = 20 vCPU, no headroom).
 export CPU="${CPU:-2}"
 # Download-flow defaults, same as run-batches.sh (see the reasoning there): ONE browser
-# per 2-vCPU task, because the software-GL editor starves with two. 9 x 2 vCPU / 4Gi =
-# 18 vCPU / 36 GiB per region, inside the ~20 vCPU / 40 GiB quota.
-export MEMORY="${MEMORY:-4Gi}"
-export PARALLELISM="${PARALLELISM:-9}"
+# per 2-vCPU task, because the software-GL editor starves with two, and 8Gi because the
+# open postcard peaks at ~4.8 GB (4Gi crashed the editor tab). 5 x 2 vCPU / 8Gi =
+# 10 vCPU / 40 GiB per region, inside a ~20 vCPU / 40 GiB quota.
+export MEMORY="${MEMORY:-8Gi}"
+export PARALLELISM="${PARALLELISM:-5}"
 export ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-1}"
 export ADOBE_STOP_AFTER_LETS_GO="${ADOBE_STOP_AFTER_LETS_GO:-0}"
 export TASK_TIMEOUT="${TASK_TIMEOUT:-8h}"
