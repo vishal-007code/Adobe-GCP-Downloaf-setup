@@ -51,7 +51,7 @@ export const test = base.extend<AdobeFixtures & AdobeTestOptions>({
     assertAssignedAccount(assignedAccount, testInfo.title);
 
     await testInfo.attach(ADOBE_ACCOUNT_ATTACHMENT, {
-      body: Buffer.from(JSON.stringify({ email: assignedAccount.email }), 'utf8'),
+      body: Buffer.from(JSON.stringify({ email: assignedAccount.email, region: assignedAccount.region }), 'utf8'),
       contentType: 'application/json',
     });
 

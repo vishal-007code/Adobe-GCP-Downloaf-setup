@@ -51,7 +51,7 @@ export default class AdobeCsvReporter implements Reporter {
   onTestEnd(test: TestCase, result: TestResult): void {
     if (!isAdobeProjectTest(test)) return;
 
-    const accountMetadata = readJsonAttachment<{ email?: string }>(result, ADOBE_ACCOUNT_ATTACHMENT);
+    const accountMetadata = readJsonAttachment<{ email?: string; region?: string }>(result, ADOBE_ACCOUNT_ATTACHMENT);
     const stepMetadata = readJsonAttachment<{ lastStep?: string }>(result, ADOBE_STEP_ATTACHMENT);
     const linkMetadata = readJsonAttachment<{ publishedLink?: string }>(result, ADOBE_LINK_ATTACHMENT);
     const loginMetadata = readJsonAttachment<{ ok?: boolean; url?: string; ownerEntity?: string; loginMs?: number }>(
@@ -67,6 +67,7 @@ export default class AdobeCsvReporter implements Reporter {
     }>(result, ADOBE_DOWNLOAD_ATTACHMENT);
     const mappedStatus = mapStatus(result.status);
     const email = accountMetadata?.email?.trim().toLowerCase() ?? '';
+    const region = accountMetadata?.region ?? '';
 
     // A login counts if the dashboard was confirmed, EVEN IF the test later failed.
     // Falling back to the step name covers runs where the attachment never landed
@@ -127,6 +128,7 @@ export default class AdobeCsvReporter implements Reporter {
     if (email) {
       const base = `[ADOBE_RESULT] status=${mappedStatus} email=${email} logged_in=${loggedIn ? 'yes' : 'no'}` +
         ` downloaded=${downloaded ? 'yes' : 'no'} outcome=${outcome}` +
+        (region ? ` region=${region}` : '') +
         Object.entries(timings).filter(([, value]) => value !== '').map(([key, value]) => ` ${key}=${value}`).join('');
       if (mappedStatus === 'failed') {
         const step = (stepMetadata?.lastStep?.trim() ?? '').replace(/"/g, "'");
@@ -156,6 +158,7 @@ export default class AdobeCsvReporter implements Reporter {
       timings.editor_open_s,
       timings.export_s,
       timings.editor_reloads,
+      region,
     ]);
 
     // Mark the account consumed only once it PASSED, i.e. its download (and upload, when

@@ -6,14 +6,13 @@ import { AdobePage } from "../../src/pages/adobe";
 import { GmailProvider } from "../../src/pages/gmailProvider";
 import { MsProvider} from "../../src/pages/msProvider";
 import { DOWNLOAD_FORMATS, DownloadFormat, EditorDashboard } from '../../src/pages/editorDashboard';
+import { REGION_TEMPLATE_URLS } from '../../src/adobe/regions';
 
 // Export format: png (default) | jpg | pdf. Set per run with ADOBE_DOWNLOAD_FORMAT.
 const DOWNLOAD_FORMAT = (process.env.ADOBE_DOWNLOAD_FORMAT?.trim().toLowerCase() || 'png') as DownloadFormat;
 if (!DOWNLOAD_FORMATS.includes(DOWNLOAD_FORMAT)) {
   throw new Error(`ADOBE_DOWNLOAD_FORMAT must be one of ${DOWNLOAD_FORMATS.join(', ')} (got "${DOWNLOAD_FORMAT}")`);
 }
-
-const FIXED_POSTCARD_URL = 'https://new.express.adobe.com/design/template/urn:aaid:sc:VA6C2:f2c97bf0-1039-5b0d-be7a-528c0060757b?category=text&entryPoint=template&taskID=postcard';
 
 /** Host of an identity-provider URL, for step names/logs. The raw URL carries
  *  state/rart OAuth tokens and is echoed into the results CSV and the [ADOBE_RESULT]
@@ -93,8 +92,10 @@ defineAdobeAccountTests('script flow', async ({ page, context, account, stepTrac
   const editorStartedAt = Date.now();
   let editorReadyAt = editorStartedAt;
   let editorReloads = 0;
+  // KVS and Bihar accounts each download their own region's postcard (src/adobe/regions.ts).
+  console.log(`Opening the ${account.region} postcard for ${account.email}`);
   const postcardPage = await context.newPage();
-  await postcardPage.goto(FIXED_POSTCARD_URL, { waitUntil: 'load' });
+  await postcardPage.goto(REGION_TEMPLATE_URLS[account.region], { waitUntil: 'load' });
   editor = new EditorDashboard(postcardPage);   // rebind; original tab stays open
 
 

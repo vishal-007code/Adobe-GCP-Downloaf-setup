@@ -1,6 +1,10 @@
+import type { AdobeRegion } from './regions';
+
 export type AdobeAccount = {
   email: string;
   password: string;
+  // Picks the postcard template the account downloads (see regions.ts).
+  region: AdobeRegion;
 };
 
 export type AdobeAccountSource =
@@ -40,6 +44,7 @@ export type AdobeResultRow = {
   editor_open_s: string;
   export_s: string;
   editor_reloads: string;
+  region: string;
 };
 
 export type AdobeConsumedRow = {
