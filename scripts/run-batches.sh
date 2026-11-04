@@ -84,6 +84,10 @@ DOWNLOADS_GCS_URI="${DOWNLOADS_GCS_URI:-gs://${REPORTS_BUCKET}/downloads}"
 ADOBE_TEST_RETRIES="${ADOBE_TEST_RETRIES:-1}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-8h}"
 BASE_JOB_NAME="${BASE_JOB_NAME:-adobe-login-flow}"
+# DEPLOY_ONLY=1: upload the CSV and deploy the job, but don't execute it. Cloud Scheduler
+# starts it later (scripts/schedule-window.sh). SCHEDULED_FOR is only text for the Chat note.
+DEPLOY_ONLY="${DEPLOY_ONLY:-0}"
+SCHEDULED_FOR="${SCHEDULED_FOR:-}"
 
 # Overridable so two regions launched at the same second get distinct GCS object
 # paths (accounts/${RUN_ID}/...) and report prefixes. Defaults to a timestamp.
@@ -226,7 +230,12 @@ log "============================================================"
 SECONDS_PER_ACCOUNT="${SECONDS_PER_ACCOUNT:-$([[ "$ADOBE_STOP_AFTER_LETS_GO" == "1" ]] && echo 90 || echo 150)}"
 total_tasks=$(( (TOTAL_ACCOUNTS + ADOBE_SCRIPT_ACCOUNT_LIMIT - 1) / ADOBE_SCRIPT_ACCOUNT_LIMIT ))
 est_min=$(( ( (total_tasks + PARALLELISM - 1) / PARALLELISM ) * ( (ADOBE_SCRIPT_ACCOUNT_LIMIT + ADOBE_PLAYWRIGHT_WORKERS - 1) / ADOBE_PLAYWRIGHT_WORKERS ) * SECONDS_PER_ACCOUNT / 60 ))
-notify "🚀 *Adobe run triggered* — ${REGION}
+if [[ "$DEPLOY_ONLY" == "1" ]]; then
+  run_title="🗓️ *Adobe run scheduled*${SCHEDULED_FOR:+ for ${SCHEDULED_FOR}}"
+else
+  run_title="🚀 *Adobe run triggered*"
+fi
+notify "${run_title} — ${REGION}
 👤 ${TOTAL_ACCOUNTS} accounts · 🧩 ${total_tasks} tasks (${ADOBE_SCRIPT_ACCOUNT_LIMIT} accounts each)
 🎯 $([[ "$ADOBE_STOP_AFTER_LETS_GO" == "1" ]] && echo "Activation only (login)" || echo "Login + Download")
 ⚙️ ${PARALLELISM} tasks at a time × ${ADOBE_PLAYWRIGHT_WORKERS} browser(s) · ${CPU} vCPU / ${MEMORY} per task
@@ -310,6 +319,11 @@ ADOBE_NOTIFY_THREAD=${GOOGLE_CHAT_THREAD_KEY},\
 SAVE_ARTIFACTS=${SAVE_ARTIFACTS}" \
       "${SECRET_FLAGS[@]}"
 
+    if [[ "$DEPLOY_ONLY" == "1" ]]; then
+      step "Deployed ${job_name}; not executing it (DEPLOY_ONLY=1)."
+      exit 0
+    fi
+
     notify "▶️ *${batch_label} launched* — ${REGION}
 📊 ${batch_rows} accounts across ${tasks} tasks
 🆔 job ${job_name} — waiting for the first task to start"
@@ -369,6 +383,11 @@ Logs: ${LOG_DIR}"
     echo "  tail -n 50 $LOG_DIR/$(printf 'batch-%02d' "$i").log"
   done
   exit 1
+fi
+
+if [[ "$DEPLOY_ONLY" == "1" ]]; then
+  log "All jobs deployed, none executed (DEPLOY_ONLY=1)."
+  exit 0
 fi
 
 log "All batches finished; the tasks posted their final summary to Chat."

@@ -57,6 +57,9 @@ export PARALLELISM="${PARALLELISM:-5}"
 export ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-1}"
 export ADOBE_STOP_AFTER_LETS_GO="${ADOBE_STOP_AFTER_LETS_GO:-0}"
 export TASK_TIMEOUT="${TASK_TIMEOUT:-8h}"
+# DEPLOY_ONLY=1 deploys both jobs without starting them, for scripts/schedule-window.sh.
+export DEPLOY_ONLY="${DEPLOY_ONLY:-0}"
+export SCHEDULED_FOR="${SCHEDULED_FOR:-}"
 
 STAMP="$(date +%Y%m%d%H%M%S)"
 # One Chat thread for the whole two-region run (each message names its region).
@@ -92,8 +95,10 @@ DATA_ROWS=$(count_rows "$MASTER")
 HALF=$(( (DATA_ROWS + 1) / 2 ))
 
 # ── 2) Split into two halves (each keeps the header) ──────────────────────────
-{ echo "$HEADER"; tail -n +2 "$MASTER" | head -n "$HALF"; }            > "$HALF1"
-{ echo "$HEADER"; tail -n +2 "$MASTER" | tail -n +"$((HALF + 1))"; }   > "$HALF2"
+# sed, not `tail | head`: head exits early, and with pipefail the SIGPIPE to tail aborts
+# the script (exit 141) once the CSV outgrows the pipe buffer (seen at 10k rows).
+{ echo "$HEADER"; sed -n "2,$((HALF + 1))p" "$MASTER"; }    > "$HALF1"
+{ echo "$HEADER"; sed -n "$((HALF + 2)),\$p" "$MASTER"; }   > "$HALF2"
 
 S1_ROWS=$(count_rows "$HALF1")
 S2_ROWS=$(count_rows "$HALF2")
@@ -145,4 +150,8 @@ if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi
 
+if [[ "$DEPLOY_ONLY" == "1" ]]; then
+  log "Both jobs deployed, not started: adobe-login-s1-batch-01 (${REGION_S1}), adobe-login-s2-batch-01 (${REGION_S2})."
+  exit 0
+fi
 log "Both regions completed."
