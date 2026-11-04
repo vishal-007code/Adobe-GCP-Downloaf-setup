@@ -1,7 +1,7 @@
 # Run report: Login only vs Login + Download
 
 How a run records each account's outcome and how to build the per-account report from
-GCP. PNGs are **not** kept. The record that the download finished is enough.
+GCP. Every PNG is also kept in the bucket as `downloads/<email>.png` (see the last section).
 
 ## What gets recorded per account
 
@@ -73,9 +73,17 @@ Inside a run, an account already gets two chances before it lands here:
 - **One test retry.** The account runs again with a fresh login (`ADOBE_TEST_RETRIES`,
   default 1).
 
-## Keeping the PNGs (off by default)
+## Keeping the PNGs (on by default)
 
-Set `DOWNLOADS_GCS_URI=gs://<bucket>/downloads` for `run-batches.sh`, or
-`ADOBE_DOWNLOADS_GCS_URI` for the task. Each test then also uploads its PNG as
-`<email>.png` (`src/adobe/download-upload.ts`). An upload failure then fails the test.
-Unset or `off` means no upload; the PNG dies with the container.
+`run-batches.sh` (and `run-india-2region.sh`) default `DOWNLOADS_GCS_URI` to
+`gs://<project>-adobe-accounts/downloads`. Each test uploads its PNG right after the download
+as `<email>.png` in that folder (`src/adobe/download-upload.ts`).
+
+- A re-run never overwrites a PNG that is already there (`--no-clobber`).
+- An upload failure fails the test, so the account is retried rather than silently missing.
+- `DOWNLOADS_GCS_URI=off` skips the upload, and the PNG dies with the container.
+
+Each postcard is ~10–12 MB, so 20k accounts are ~200 GB, about $4–5 a month in Standard
+storage. Fetch them with
+`gcloud storage cp -r gs://<project>-adobe-accounts/downloads <local dir>`; downloading
+them out of GCP is billed as egress, about $25 for 200 GB.

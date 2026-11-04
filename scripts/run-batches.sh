@@ -22,6 +22,12 @@ fi
 
 : "${IMAGE_URI:?IMAGE_URI is required. Run scripts/setup-run.sh first and copy the printed IMAGE_URI.}"
 
+# Launching from Git Bash on Windows: MSYS path conversion rewrites the --set-env-vars
+# argument (gs://bucket/... -> gs;\bucket\..., /tmp/... -> C:\...\Temp\...), so every
+# task would get a broken accounts URI. Exclude just that argument; gcloud's own wrapper
+# still needs conversion, so MSYS_NO_PATHCONV=1 would break gcloud itself. No-op on Linux.
+export MSYS2_ARG_CONV_EXCL="${MSYS2_ARG_CONV_EXCL:+${MSYS2_ARG_CONV_EXCL};}--set-env-vars="
+
 # Defaults to the active gcloud project (projects rotate per trial; never hardcode one).
 PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null | tr -d '\r')}"
 : "${PROJECT_ID:?set PROJECT_ID, or pick a project with: gcloud config set project <id>}"
@@ -41,19 +47,23 @@ TOTAL_ACCOUNTS="${TOTAL_ACCOUNTS:-}"
 BATCH_SIZE="${BATCH_SIZE:-}"
 
 CPU="${CPU:-2}"
-MEMORY="${MEMORY:-4Gi}"
+# 8Gi for ONE browser. The KVS/Bihar postcards are ~5000x3500 px; while one is open the
+# task peaks at ~4.8 GB (renderer ~1.8 GB + SwiftShader gpu-process ~1.3 GB + the dashboard
+# tab + in-memory /tmp). At 4Gi the editor tab died with "Page crashed" on every account
+# (first GCP run, 2026-10-30); at 8Gi the same accounts downloaded.
+MEMORY="${MEMORY:-8Gi}"
 # Concurrent tasks per job. A job's deploy must satisfy PARALLELISM x {CPU, MEMORY}
-# within the regional quota: 20 vCPU and 40 GiB total per India region.
-#   PARALLELISM=9 x CPU=2      = 18 vCPU  (<= 20)
-#   PARALLELISM=9 x MEMORY=4Gi = 36 GiB   (<= 40)
+# within the regional quota. Older trial projects had 20 vCPU / 40 GiB per India region:
+#   PARALLELISM=5 x CPU=2      = 10 vCPU  (<= 20)
+#   PARALLELISM=5 x MEMORY=8Gi = 40 GiB   (<= 40)
+# project-35fb1b7b-... reports 128 vCPU / 256 GiB per region; check the project's
+# "Total memory allocation" quota and raise PARALLELISM to match.
 # Throughput ~= PARALLELISM accounts in flight (one browser per task, see below).
-# Going faster needs a Cloud Run CPU/Memory quota increase for the region.
-PARALLELISM="${PARALLELISM:-9}"
+PARALLELISM="${PARALLELISM:-5}"
 # Browsers per task. Keep 1 for the download flow: the editor renders with software GL
 # (SwiftShader), and two browsers on 2 vCPU starve it ("Authoring engine did not
 # start", the Download button never mounts, clicks stall; 2026-10-16 diag). The
-# 2026-10-26 local pre-flight with 1 browser went 19/19. 4Gi is ample for one browser
-# (the old "Page crashed" OOM was 4Gi shared by 3). Activation-only runs
+# 2026-10-26 local pre-flight with 1 browser went 19/19. Activation-only runs
 # (ADOBE_STOP_AFTER_LETS_GO=1) never open the editor and can use 3-4.
 ADOBE_PLAYWRIGHT_WORKERS="${ADOBE_PLAYWRIGHT_WORKERS:-1}"
 ADOBE_SCRIPT_ACCOUNT_LIMIT="${ADOBE_SCRIPT_ACCOUNT_LIMIT:-21}"
@@ -64,15 +74,20 @@ ADOBE_STRICT_LETS_GO="${ADOBE_STRICT_LETS_GO:-1}"
 ADOBE_VIDEO_MODE="${ADOBE_VIDEO_MODE:-off}"
 ADOBE_DEBUG_ARTIFACTS="${ADOBE_DEBUG_ARTIFACTS:-0}"
 SAVE_ARTIFACTS="${SAVE_ARTIFACTS:-false}"
-# PNGs are not kept by default (off): each download is recorded as downloaded=yes in the
-# account's [ADOBE_RESULT] log line, and `bash scripts/build-run-report.sh` turns those
-# into the per-account report. Set DOWNLOADS_GCS_URI=gs://${REPORTS_BUCKET}/downloads to
-# also upload every PNG as <email>.png.
-DOWNLOADS_GCS_URI="${DOWNLOADS_GCS_URI:-off}"
+# Every PNG is kept: each test uploads it right after the download as
+# gs://${REPORTS_BUCKET}/downloads/<email>.png (src/adobe/download-upload.ts; a re-run never
+# overwrites an existing PNG). The download is also recorded as downloaded=yes in the
+# account's [ADOBE_RESULT] log line, which `bash scripts/build-run-report.sh` reads.
+# DOWNLOADS_GCS_URI=off skips the upload and keeps only that record.
+DOWNLOADS_GCS_URI="${DOWNLOADS_GCS_URI:-gs://${REPORTS_BUCKET}/downloads}"
 # Re-run a failed account once (fresh login) inside the same task before giving up on it.
 ADOBE_TEST_RETRIES="${ADOBE_TEST_RETRIES:-1}"
 TASK_TIMEOUT="${TASK_TIMEOUT:-8h}"
 BASE_JOB_NAME="${BASE_JOB_NAME:-adobe-login-flow}"
+# DEPLOY_ONLY=1: upload the CSV and deploy the job, but don't execute it. Cloud Scheduler
+# starts it later (scripts/schedule-window.sh). SCHEDULED_FOR is only text for the Chat note.
+DEPLOY_ONLY="${DEPLOY_ONLY:-0}"
+SCHEDULED_FOR="${SCHEDULED_FOR:-}"
 
 # Overridable so two regions launched at the same second get distinct GCS object
 # paths (accounts/${RUN_ID}/...) and report prefixes. Defaults to a timestamp.
@@ -203,19 +218,24 @@ log "Parallelism:   ${PARALLELISM} (tasks running at once per job)"
 log "Workers:       ${ADOBE_PLAYWRIGHT_WORKERS}"
 log "Acct limit:    ${ADOBE_SCRIPT_ACCOUNT_LIMIT}"
 log "Stop after login: ${ADOBE_STOP_AFTER_LOGIN}"
-log "PNG uploads:   ${DOWNLOADS_GCS_URI} (off = downloads recorded in the logs only)"
+log "PNG uploads:   ${DOWNLOADS_GCS_URI}/<email>.png (DOWNLOADS_GCS_URI=off = logs only)"
 log "Test retries:  ${ADOBE_TEST_RETRIES}"
 log "Save reports:  ${SAVE_ARTIFACTS} (CSV/HTML reports only; false = logs only)"
 log "Chat in tasks: ${CHAT_IN_TASKS}"
 log "============================================================"
 
 # Rough duration: waves of PARALLELISM tasks, each task ADOBE_SCRIPT_ACCOUNT_LIMIT accounts
-# shared by its workers, at SECONDS_PER_ACCOUNT (~230s measured for the download flow on
-# 2 vCPU per browser; login-only is ~90s).
-SECONDS_PER_ACCOUNT="${SECONDS_PER_ACCOUNT:-$([[ "$ADOBE_STOP_AFTER_LETS_GO" == "1" ]] && echo 90 || echo 230)}"
+# shared by its workers, at SECONDS_PER_ACCOUNT (~150s measured for the download flow on
+# Cloud Run, 2 vCPU / 8Gi per browser, 2026-10-30; login-only is ~90s).
+SECONDS_PER_ACCOUNT="${SECONDS_PER_ACCOUNT:-$([[ "$ADOBE_STOP_AFTER_LETS_GO" == "1" ]] && echo 90 || echo 150)}"
 total_tasks=$(( (TOTAL_ACCOUNTS + ADOBE_SCRIPT_ACCOUNT_LIMIT - 1) / ADOBE_SCRIPT_ACCOUNT_LIMIT ))
 est_min=$(( ( (total_tasks + PARALLELISM - 1) / PARALLELISM ) * ( (ADOBE_SCRIPT_ACCOUNT_LIMIT + ADOBE_PLAYWRIGHT_WORKERS - 1) / ADOBE_PLAYWRIGHT_WORKERS ) * SECONDS_PER_ACCOUNT / 60 ))
-notify "🚀 *Adobe run triggered* — ${REGION}
+if [[ "$DEPLOY_ONLY" == "1" ]]; then
+  run_title="🗓️ *Adobe run scheduled*${SCHEDULED_FOR:+ for ${SCHEDULED_FOR}}"
+else
+  run_title="🚀 *Adobe run triggered*"
+fi
+notify "${run_title} — ${REGION}
 👤 ${TOTAL_ACCOUNTS} accounts · 🧩 ${total_tasks} tasks (${ADOBE_SCRIPT_ACCOUNT_LIMIT} accounts each)
 🎯 $([[ "$ADOBE_STOP_AFTER_LETS_GO" == "1" ]] && echo "Activation only (login)" || echo "Login + Download")
 ⚙️ ${PARALLELISM} tasks at a time × ${ADOBE_PLAYWRIGHT_WORKERS} browser(s) · ${CPU} vCPU / ${MEMORY} per task
@@ -299,6 +319,11 @@ ADOBE_NOTIFY_THREAD=${GOOGLE_CHAT_THREAD_KEY},\
 SAVE_ARTIFACTS=${SAVE_ARTIFACTS}" \
       "${SECRET_FLAGS[@]}"
 
+    if [[ "$DEPLOY_ONLY" == "1" ]]; then
+      step "Deployed ${job_name}; not executing it (DEPLOY_ONLY=1)."
+      exit 0
+    fi
+
     notify "▶️ *${batch_label} launched* — ${REGION}
 📊 ${batch_rows} accounts across ${tasks} tasks
 🆔 job ${job_name} — waiting for the first task to start"
@@ -358,6 +383,11 @@ Logs: ${LOG_DIR}"
     echo "  tail -n 50 $LOG_DIR/$(printf 'batch-%02d' "$i").log"
   done
   exit 1
+fi
+
+if [[ "$DEPLOY_ONLY" == "1" ]]; then
+  log "All jobs deployed, none executed (DEPLOY_ONLY=1)."
+  exit 0
 fi
 
 log "All batches finished; the tasks posted their final summary to Chat."
